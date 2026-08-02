@@ -1,0 +1,55 @@
+<body>
+
+<h1>Bingo Player</h1>
+
+<p>
+Status:
+<span id="status">Disconnected</span>
+</p>
+
+<div id="currentNumber"
+     style="
+       font-size: 80px;
+       font-weight: bold;
+     ">
+    ---
+</div>
+
+
+<script>
+
+const socket = new WebSocket("ws://127.0.0.1:8000/ws");
+
+
+socket.onopen = function() {
+
+    document.getElementById("status").textContent =
+        "Connected";
+
+};
+
+
+socket.onmessage = function(event) {
+
+    const message = JSON.parse(event.data);
+
+    if (message.type === "number_called") {
+
+        document.getElementById("currentNumber").textContent =
+            message.number;
+
+    }
+
+};
+
+
+socket.onclose = function() {
+
+    document.getElementById("status").textContent =
+        "Disconnected";
+
+};
+
+</script>
+
+</body>

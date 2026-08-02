@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Bingo Host</title>
+</head>
+
+<body>
+
+<h1>Bingo Host</h1>
+
+<input id="numberInput" type="text" placeholder="Enter number">
+
+<button id="previewButton">
+    Preview
+</button>
+
+<div id="preview"></div>
+
+<button id="broadcastButton" disabled>
+    Broadcast
+</button>
+
+<script>
+
+let pendingNumber = null;
+const socket = new WebSocket("ws://127.0.0.1:8000/ws");
+
+document.getElementById("previewButton").onclick = function() {
+
+    const value =
+        document.getElementById("numberInput").value;
+
+    /*
+       For now we duplicate the simple
+       canonicalization rule in JavaScript.
+       Later we will move this entirely
+       to the server.
+    */
+
+    if (value === "52") {
+
+        pendingNumber = "G52";
+
+    } else {
+
+        pendingNumber = value.toUpperCase();
+
+    }
+
+
+    document.getElementById("preview").textContent =
+        "Ready to broadcast: " + pendingNumber;
+
+
+    document.getElementById("broadcastButton").disabled = false;
+
+};
+
+socket.onopen = function() {
+
+    console.log("Host connected");
+
+};
+
+
+document.getElementById("broadcastButton").onclick = function() {
+
+    const message = {
+
+        type: "submit_number",
+
+        value: pendingNumber
+
+    };
+
+    socket.send(JSON.stringify(message));
+
+};
+
+</script>
+
+</body>
+
+</html>
