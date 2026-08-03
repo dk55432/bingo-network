@@ -92,12 +92,14 @@ async def websocket_endpoint(websocket: WebSocket):
                     "type": "number_called",
                     "number": number
                 }
-                game.record_called_number(number)
-                print(game.called_numbers)
                 
-                await manager.broadcast(
-                    json.dumps(event)
-                )            
+                # TODO: Right now the server is responsible for these 3 commands. As the game logic grows, we'll want GameState to own more of the "what happens when a number is called" workflow.  That keeps the WebSocket handler focused on networking rather than game rules.
+                accepted = game.call_number(number)
+                if accepted:
+                    await manager.broadcast(
+                        json.dumps(event)
+                    )  
+                    print(game.called_numbers)
 
             elif data["type"] == "reconnect":
                 player = game.get_player(data["player_id"])

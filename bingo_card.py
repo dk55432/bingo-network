@@ -43,6 +43,31 @@ class BingoCard:
         for row in range(5):
             for col in range(5):
                 if self.grid[row][col] == number:
-                    self.marked[row][col] = True
-                    return True
+                    if not self.marked[row][col]:
+                        self.marked[row][col] = True
+                        return True
+                    return False
+        return False    
+    
+    
+    # TODO: Need to accommodate more custom bingo winner layouts like postage-stamp
+    def has_bingo(self):
+        # check rows
+        for row in range(5):
+            if all(self.marked[row]):
+                return True
+
+        # check columns
+        for col in range(5):
+            if all(self.marked[row][col] for row in range(5)):
+                return True
+
+        # check diagonal 1
+        if all(self.marked[i][i] for i in range(5)):
+            return True
+
+        # check diagonal 2
+        if all(self.marked[i][4-i] for i in range(5)):
+            return True
+
         return False

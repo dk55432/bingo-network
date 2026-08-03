@@ -3,8 +3,9 @@ from player import Player
 class GameState:
     def __init__(self):
         self.called_numbers = []
+        self.called_set = set()
         self.current_number: str | None = None
-        self.players: list[Player] = []
+        self.players: dict[str, Player] = {}
         
     def __str__(self):
         result = f"Players: {len(self.players)}\n"
@@ -18,13 +19,28 @@ class GameState:
         self.called_numbers.append(number)
 
     def add_player(self, player: Player):
-        self.players.append(player)
-        
+        self.players[player.player_id] = player
+                
     def get_player(self, player_id: str):
-        for player in self.players:
-            if player.player_id == player_id:
-                return player
-        return None
+        return self.players.get(player_id)
+    
+    def call_number(self, number):
+
+        if number in self.called_set:
+            return False
+
+        self.current_number = number
+        self.called_numbers.append(number)
+        self.called_set.add(number)
+
+        for player in self.players.values():
+
+            for card in player.cards:
+
+                card.mark_number(number)
+
+        return True
+        
         
     def find_winners(self):
         winners = []
