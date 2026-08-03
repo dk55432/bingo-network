@@ -1,84 +1,57 @@
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.templating import Jinja2Templates
-import asyncio
 import json
+import uuid
+from datetime import datetime
+from connection_manager import ConnectionManager
+from game import GameState, canonicalize_number
+from player import Player
 
-connected_clients = []
 app = FastAPI()
+manager = ConnectionManager()
+game = GameState()
 
 templates = Jinja2Templates(directory="templates")
 
-def canonicalize_number(value):
-
-    value = value.strip().upper()
-
-    if value.isdigit():
-
-        number = int(value)
-
-        if 46 <= number <= 60:
-            return f"G{number}"
-
-    return value
-
-
-class ConnectionManager:
-
-    def __init__(self):
-        self.active_connections = []
-
-
-    async def connect(self, websocket: WebSocket):
-
-        await websocket.accept()
-
-        self.active_connections.append(websocket)
-
-
-    def disconnect(self, websocket: WebSocket):
-
-        self.active_connections.remove(websocket)
-
-
-    async def broadcast(self, message: str):
-
-        for connection in self.active_connections:
-
-            await connection.send_text(message)
-
-manager = ConnectionManager()
-
 @app.get("/")
-async def player(request: Request):
+async def join_page(request: Request):
+    return templates.TemplateResponse(
+        request=request,
+        # name="player.html"
+        name="join.html"
+    )
+ 
+@app.get("/player")
+async def player_page(request: Request):
     return templates.TemplateResponse(
         request=request,
         name="player.html"
     )
+     
+@app.get("/host")
+async def host(request: Request):
+    return templates.TemplateResponse(
+        request=request,
+        name="host.html"
+    )   
     
-async def broadcast(message: str):
-
-    for client in connected_clients:
-        await client.send_text(message)
-
+    
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-
     await manager.connect(websocket)
-
     print(f"Clients connected: {len(manager.active_connections)}")
 
     try:
-
-        # while True:
-
-            # message = await websocket.receive_text()
-            # data = json.loads(message)
-            # print(data)
-            # print(f"Received: {message}")
-            # await manager.broadcast(message)
         while True:
 
             message = await websocket.receive_text()
+            print("Received:", message)
+            await websocket.send_text(
+                json.dumps({
+                    "type": "history",
+                    "called_numbers": game.called_numbers
+                })
+            )
 
             try:
                 data = json.loads(message)
@@ -86,31 +59,40 @@ async def websocket_endpoint(websocket: WebSocket):
             except json.JSONDecodeError:
                 print(f"Invalid JSON received: {message!r}")
                 continue
+            
+            if data["type"] == "join":
+                player = Player(
+                    player_id = str(uuid.uuid4()),
+                    display_name = data["display_name"],
+                    websocket = websocket,
+                    connected_at = datetime.now()
+                )
+                # TODO: At some point we'll want to store mapping websocket -> player
                 
-            if data["type"] == "submit_number":
-
+                game.add_player(player)
+                print("Game is now: "+str(game))
+                await websocket.send_text(
+                    json.dumps({
+                        "type": "joined",
+                        "player_id": player.get_player_id()
+                    })
+                )
+                
+            elif data["type"] == "submit_number":
                 number = canonicalize_number(data["value"])
-
                 event = {
                     "type": "number_called",
                     "number": number
                 }
-
+                game.record_called_number(number)
+                print(game.called_numbers)
+                
                 await manager.broadcast(
                     json.dumps(event)
                 )            
 
     except WebSocketDisconnect:
-
         manager.disconnect(websocket)
-
         print(f"Clients connected: {len(manager.active_connections)}")
     
-        
-@app.get("/host")
-async def host(request: Request):
-
-    return templates.TemplateResponse(
-        request=request,
-        name="host.html"
-    )
+    

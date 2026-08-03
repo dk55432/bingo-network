@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        Join a bingo game
+    </head>
+    <body>
+        <h1>Join Bingo Game</h1>
+
+        <input id="displayName" placeholder="Your name">
+
+        <button id="joinButton">
+            Join
+        </button>
+
+        <script>
+            const socket = new WebSocket(
+                "ws://127.0.0.1:8000/ws"
+            );
+
+            document.getElementById("joinButton").onclick = function() {
+                console.log("Join button clicked");
+                const message = {
+                    type: "join",
+                    display_name:
+                        document.getElementById("displayName").value
+                };
+                console.log(message);
+                socket.send(JSON.stringify(message));
+            };            
+
+            socket.onmessage = function(event) {
+
+                const data = JSON.parse(event.data);
+
+                if (data.type === "joined") {
+
+                    localStorage.setItem(
+                        "player_id",
+                        data.player_id
+                    );
+
+                    window.location.href = "/player";
+                }
+
+            };            
+        </script>
+    </body>
+</html>

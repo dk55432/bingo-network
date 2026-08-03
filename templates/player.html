@@ -39,6 +39,11 @@ socket.onmessage = function(event) {
             message.number;
 
     }
+    if (message.type === "history") {
+
+        console.log("History:", message.called_numbers);
+
+    }
 
 };
 
