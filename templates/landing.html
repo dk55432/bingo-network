@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+
+<body>
+
+<p>Loading...</p>
+
+<script>
+
+const playerId = localStorage.getItem("player_id");
+
+if (playerId) {
+
+    window.location.href = "/player";
+
+}
+else {
+
+    window.location.href = "/join";
+
+}
+
+</script>
+
+</body>
+</html>

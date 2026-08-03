@@ -18,9 +18,17 @@ async def join_page(request: Request):
     return templates.TemplateResponse(
         request=request,
         # name="player.html"
+        # name="join.html"
+        name="landing.html"
+    )
+
+@app.get("/join")
+async def join_page(request: Request):
+    return templates.TemplateResponse(
+        request=request,
         name="join.html"
     )
- 
+    
 @app.get("/player")
 async def player_page(request: Request):
     return templates.TemplateResponse(
@@ -91,6 +99,19 @@ async def websocket_endpoint(websocket: WebSocket):
                     json.dumps(event)
                 )            
 
+            elif data["type"] == "reconnect":
+                player = game.get_player(data["player_id"])
+                if player:
+                    player.connect(websocket)
+                    await websocket.send_text(json.dumps({
+                        "type": "reconnected"
+                    }))
+                else:
+                    await websocket.send_text(json.dumps({
+                        "type": "reconnect_failed"
+                    }))
+                    # print(f"{player.display_name} reconnected")
+                
     except WebSocketDisconnect:
         manager.disconnect(websocket)
         print(f"Clients connected: {len(manager.active_connections)}")

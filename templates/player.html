@@ -2,6 +2,10 @@
 
 <h1>Bingo Player</h1>
 
+        <button id="leaveGameButton">
+            Leave Game
+        </button>
+
 <p>
 Status:
 <span id="status">Disconnected</span>
@@ -20,8 +24,15 @@ Status:
 
 const socket = new WebSocket("ws://127.0.0.1:8000/ws");
 
-
 socket.onopen = function() {
+
+    console.log("Player socket connected");
+    
+    const player_id = localStorage.getItem("player_id");
+    socket.send(JSON.stringify({
+        type: "reconnect",
+        player_id: player_id
+    }));
 
     document.getElementById("status").textContent =
         "Connected";
@@ -31,29 +42,48 @@ socket.onopen = function() {
 
 socket.onmessage = function(event) {
 
-    const message = JSON.parse(event.data);
+    const data = JSON.parse(event.data);
 
-    if (message.type === "number_called") {
+    if (data.type === "reconnected") {
+
+        console.log("Reconnect successful");
+
+    }
+    else if (data.type === "reconnect_failed") {
+
+        localStorage.removeItem("player_id");
+        window.location.href = "/";
+
+    }
+    else if (data.type === "number_called") {
 
         document.getElementById("currentNumber").textContent =
-            message.number;
+            data.number;
 
     }
-    if (message.type === "history") {
+    else if (data.type === "history") {
 
-        console.log("History:", message.called_numbers);
+        console.log("History:", data.called_numbers);
 
     }
-
 };
 
 
+// socket.onclose = function() {
+
+//     document.getElementById("status").textContent =
+//         "Disconnected";
+
+// };
 socket.onclose = function() {
-
-    document.getElementById("status").textContent =
-        "Disconnected";
-
+    console.log("Join WebSocket closed");
 };
+
+document.getElementById("leaveGameButton").onclick = function() {
+    console.log("Pressed leaveGameButton")
+    localStorage.removeItem("player_id");
+    window.location.href = "/join";
+}
 
 </script>
 

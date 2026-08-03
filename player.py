@@ -31,10 +31,10 @@ class Player:
         self.cards.append(card)
         
     def connect(self, websocket: WebSocket):
-        pass
+        self.websocket = websocket
     
     def disconnect(self):
-        pass
+        self.websocket = None
     
     def get_player_id(self):
         return self.player_id
