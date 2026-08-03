@@ -15,3 +15,7 @@ class ConnectionManager:
     async def broadcast(self, message: str):
         for connection in self.active_connections:
             await connection.send_text(message)
+            
+    async def send_to_player(self, websocket, message):
+        await websocket.send_text(message)        
+    

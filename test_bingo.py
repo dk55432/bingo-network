@@ -36,11 +36,11 @@ print(player)
 # game.call_number("O61")
 
 # Vertical bingo, col 1
-# game.call_number("B1")
-# game.call_number("B2")
-# game.call_number("B3")
-# game.call_number("B4")
-# game.call_number("B5")
+game.call_number("B1")
+game.call_number("B2")
+game.call_number("B3")
+game.call_number("B4")
+game.call_number("B5")
 
 # Diagonal bingo starting at [1],[1]
 # game.call_number("B1")
@@ -56,13 +56,13 @@ print(player)
 # game.call_number("G47")
 # game.call_number("O61")
 
-game.call_number("B1")
-game.call_number("B1")
-print ("len of called_numbers is "+str(len(game.called_numbers)))
+# game.call_number("B1")
+# game.call_number("B1")
+# print ("len of called_numbers is "+str(len(game.called_numbers)))
 
 print("After calls:")
 print(player)
-
+print(player.cards[0].to_dict())
 
 print(
     "Bingo?",

@@ -71,3 +71,12 @@ class BingoCard:
             return True
 
         return False
+
+
+    def to_dict(self):
+
+        return {
+            "card_id": self.card_id,
+            "grid": self.grid,
+            "marked": self.marked
+        }

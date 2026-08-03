@@ -5,6 +5,7 @@
         <button id="leaveGameButton">
             Leave Game
         </button>
+<div id="card"></div>
 
 <p>
 Status:
@@ -71,8 +72,14 @@ socket.onmessage = function(event) {
         console.log("WINNER!", data.winners);
 
         alert("BINGO!");
-
-    }    
+    } 
+    // TODO:  Change "card" to "cards"
+    else if (data.type === "card") {
+        console.log("Received card:", data.card);
+    }
+    else if (data.type === "card_update") {
+        console.log("Updated card:", data.card);
+    }
 };
 
 

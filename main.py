@@ -79,23 +79,20 @@ async def websocket_endpoint(websocket: WebSocket):
                 # TODO: At some point we'll want to store mapping websocket -> player
                 
                 player.add_card(create_test_card())
-                # DAVE: TEMP: I put this here to echo out the assigned card.
-                await websocket.send_text(
-                    json.dumps({
-                        "type": "card",
-                        "grid": player.__str__()
-                    })
-                )
-                
-                
                 game.add_player(player)
-                print("Game is now: "+str(game))
+
                 await websocket.send_text(
                     json.dumps({
                         "type": "joined",
-                        "player_id": player.get_player_id()
+                        "player_id": player.player_id
                     })
-                )
+                )                
+                await websocket.send_text(
+                    json.dumps({
+                        "type": "card",
+                        "card": player.cards[0].to_dict()
+                    })
+                )                
                 
             elif data["type"] == "submit_number":
 
@@ -106,8 +103,28 @@ async def websocket_endpoint(websocket: WebSocket):
                     "number": number
                 }
 
-                winners = game.call_number(number)
+                result = game.call_number(number)
+                winners = result["winners"]
+                updated_cards = result["updated_cards"]
+                
+                print("UPDATED CARDS:")
+                for update in updated_cards:
+                    print(update)
+                
+                for update in updated_cards:
 
+                    player_id = update["player_id"]
+
+                    player = game.players[player_id]
+
+                    await manager.send_to_player(
+                        player.websocket,
+                        json.dumps({
+                            "type": "card_update",
+                            "card": update["card"]
+                        })
+                    )
+    
                 print(game.called_numbers)
                 print("WINNERS:", winners)
 
@@ -128,18 +145,28 @@ async def websocket_endpoint(websocket: WebSocket):
                     
         
             elif data["type"] == "reconnect":
-                player = game.get_player(data["player_id"])
+
+                player_id = data["player_id"]
+
+                player = game.players.get(player_id)
+
                 if player:
-                    player.connect(websocket)
-                    await websocket.send_text(json.dumps({
-                        "type": "reconnected"
-                    }))
-                else:
-                    await websocket.send_text(json.dumps({
-                        "type": "reconnect_failed"
-                    }))
-                    # print(f"{player.display_name} reconnected")
-                
+
+                    player.websocket = websocket
+
+                    await websocket.send_text(
+                        json.dumps({
+                            "type": "reconnected"
+                        })
+                    )
+
+                    await websocket.send_text(
+                        json.dumps({
+                            "type": "card",
+                            "card": player.cards[0].to_dict()
+                        })
+                    ) 
+                       
     except WebSocketDisconnect:
         manager.disconnect(websocket)
         print(f"Clients connected: {len(manager.active_connections)}")
