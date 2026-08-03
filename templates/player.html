@@ -66,6 +66,13 @@ socket.onmessage = function(event) {
         console.log("History:", data.called_numbers);
 
     }
+    else if (data.type === "winner") {
+
+        console.log("WINNER!", data.winners);
+
+        alert("BINGO!");
+
+    }    
 };
 
 

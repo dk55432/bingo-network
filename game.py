@@ -27,11 +27,13 @@ class GameState:
     def call_number(self, number):
 
         if number in self.called_set:
-            return False
+            return []
 
         self.current_number = number
         self.called_numbers.append(number)
         self.called_set.add(number)
+
+        winners = []
 
         for player in self.players.values():
 
@@ -39,8 +41,14 @@ class GameState:
 
                 card.mark_number(number)
 
-        return True
-        
+                if card.has_bingo():
+
+                    winners.append({
+                        "player_id": player.player_id,
+                        "card_id": card.card_id
+                    })
+
+        return winners        
         
     def find_winners(self):
         winners = []
