@@ -67,12 +67,6 @@ async def websocket_endpoint(websocket: WebSocket):
 
             message = await websocket.receive_text()
             print("Received:", message)
-            await websocket.send_text(
-                json.dumps({
-                    "type": "history",
-                    "called_numbers": game.called_numbers
-                })
-            )
 
             try:
                 data = json.loads(message)
@@ -94,18 +88,25 @@ async def websocket_endpoint(websocket: WebSocket):
                 player.add_card(create_test_card(player.display_name, "1"))
                 game.add_player(player)
 
-                await websocket.send_text(
+                await manager.send_to_player( player.websocket,
                     json.dumps({
                         "type": "joined",
                         "player_id": player.player_id
                     })
                 )
-                await websocket.send_text(
+                await manager.send_to_player( player.websocket,
                     json.dumps({
                         "type": "card",
                         "card": player.cards[0].to_dict()
                     })
-                )                
+                )            
+                await manager.send_to_player( player.websocket,
+                    json.dumps({
+                        "type": "history",
+                        "called_numbers": game.called_numbers
+                    })
+                )
+    
                 # Debug
                 print("Post-join: Players:")
                 for player in game.players.values():
@@ -136,7 +137,13 @@ async def websocket_endpoint(websocket: WebSocket):
                     
                 for update in updated_cards:
                     player = game.players[update["player_id"]]
-                    if player.websocket is None:
+                    if player is None:
+                        await manager.send_to_player(
+                            websocket,
+                            json.dumps({
+                                "type": "reconnect_failed"
+                            })
+                        )
                         continue
                     await manager.send_to_player(
                         player.websocket,
@@ -167,51 +174,69 @@ async def websocket_endpoint(websocket: WebSocket):
             elif data["type"] == "reconnect":
                 player_id = data["player_id"]
                 player = game.players.get(player_id)
-                if player:
-                    player.websocket = websocket
-                    player.connected = True
-                    await websocket.send_text(
+                if player is None:
+                    await manager.send_to_player(
+                        websocket,
                         json.dumps({
-                            "type": "reconnected"
+                            "type": "reconnect_failed"
                         })
                     )
-                    # Re-send history only to this reconnected player
-                    await websocket.send_text(
-                        json.dumps({
-                            "type": "history",
-                            "called_numbers": game.called_numbers
-                        })
-                    )
+                    continue
+                player.websocket = websocket
+                player.connected = True
+                await manager.send_to_player( player.websocket,
+                    json.dumps({
+                        "type": "reconnected"
+                    })
+                )
+                # Re-send history only to this reconnected player
+                await manager.send_to_player( player.websocket,
+                    json.dumps({
+                        "type": "history",
+                        "called_numbers": game.called_numbers
+                    })
+                )
 
-                    # DAVE: I keep getting cards[0] error, cards is null
-                    # Clean this issue up when refactoring to support multi-cards.
-                    if len(player.cards) == 0:
-                        await websocket.send_text(
-                            json.dumps({
-                                "type": "card",
-                                "card": None
-                            })
-                        ) 
-                    else:
-                        await websocket.send_text(
-                            json.dumps({
-                                "type": "card",
-                                "card": player.cards[0].to_dict()
-                            })
-                        ) 
-                    # Debug
-                    print("Post-reconnect: Players:")
-                    for player in game.players.values():
-                        print(
-                            player.display_name,
-                            player.connected,
-                            player.websocket is not None
-                        )
+                # DAVE: I keep getting cards[0] error, cards is null
+                # Clean this issue up when refactoring to support multi-cards.
+                if len(player.cards) == 0:
+                    await manager.send_to_player( websocket,
+                        json.dumps({
+                            "type": "card",
+                            "card": None
+                        })
+                    ) 
+                else:
+                    await manager.send_to_player( websocket,
+                        json.dumps({
+                            "type": "card",
+                            "card": player.cards[0].to_dict()
+                        })
+                    ) 
+                # Debug
+                print("Post-reconnect: Players:")
+                for player in game.players.values():
+                    print(
+                        player.display_name,
+                        player.connected,
+                        player.websocket is not None
+                    )
 
             elif data["type"] == "leave":
-                disconnect_player(websocket)
-                await websocket.send_text(
-                    json.dumps({"type": "left"})
+                player = game.get_player(data["player_id"])
+                if player is None:
+                    await manager.send_to_player(
+                        websocket,
+                        json.dumps({
+                            "type": "reconnect_failed" # TODO: is this the right msg?
+                        })
+                    )
+                else:
+                    game.remove_player(player.player_id)
+                    disconnect_player(websocket)
+                await manager.send_to_player( websocket,
+                    json.dumps({"type": "left",
+                                "message": "Bye"})
                 )
             
             elif data["type"] == "start_new_game":
@@ -223,17 +248,27 @@ async def websocket_endpoint(websocket: WebSocket):
                     })
                 )
                 await broadcast_history(game)
-                await broadcast_cards(game)
+                for player in game.players:
+                    await send_cards_to_player(player)
                 
             # TODO: This goes away when we implement OCR scanning / card inputs.
             elif data["type"] == "load_test_card":
                 player_id = data["player_id"]
                 number = data["number"]
                 player = game.get_player(player_id)
-                print("In load_test_card block, will load grid "+str(number))
+                if player is None:
+                    await manager.send_to_player(
+                        websocket,
+                        json.dumps({
+                            "type": "reconnect_failed"
+                        })
+                    )
+                    continue
+                print("In load_test_card block, player "+str(player)
+                      +" will load grid "+str(number))
                 player.dispose_cards() # DAVE: Do I need to do this?
                 player.add_card(create_test_card("test card", number))
-                await websocket.send_text(
+                await manager.send_to_player( websocket,
                     json.dumps({
                         "type": "card",
                         "card": player.cards[0].to_dict()
@@ -244,12 +279,20 @@ async def websocket_endpoint(websocket: WebSocket):
                 print("Entering disposeCards block")
                 player_id = data["player_id"]
                 player = game.get_player(player_id)
+                if player is None:
+                    await manager.send_to_player(
+                        websocket,
+                        json.dumps({
+                            "type": "reconnect_failed"
+                        })
+                    )
+                    continue
                 print("disposeCards for player "+ str(player))
                 # DAVE: null player when server restarts but browser doesn't.
                 if player is not None:
                     player.dispose_cards()
                 print("after disposeCards for player "+ str(player))
-                await websocket.send_text(
+                await manager.send_to_player( websocket,
                     json.dumps({
                         "type": "card",
                         "card": []
@@ -278,20 +321,19 @@ async def broadcast_history(game):
         })
     )
 
-async def broadcast_cards(game):
-    for player in game.players.values():
-        if player.cards is not None and len(player.cards) > 0:
-            await manager.broadcast(
-                json.dumps({
-                    "type": "card",
-                    "card": player.cards[0].to_dict()
-                })
-            )     
-        else:
-            await manager.broadcast(
-                json.dumps({
-                    "type": "card",
-                    "card": []
-                })
-            )     
+async def send_cards_to_player(player):
+    if player.cards is not None and len(player.cards) > 0:
+        await manager.broadcast(
+            json.dumps({
+                "type": "card",
+                "card": player.cards[0].to_dict()
+            })
+        )     
+    else:
+        await manager.broadcast(
+            json.dumps({
+                "type": "card",
+                "card": []
+            })
+        )     
             

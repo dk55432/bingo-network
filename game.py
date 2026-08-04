@@ -6,6 +6,7 @@ class GameState:
         self.called_set = set()
         self.current_number: str | None = None
         self.players: dict[str, Player] = {}
+        print("NEW GAMESTATE CREATED")
         
     def __str__(self):
         result = f"Players: {len(self.players)}\n"
@@ -27,6 +28,9 @@ class GameState:
 
     def add_player(self, player: Player):
         self.players[player.player_id] = player
+        
+    def remove_player(self, player_id: str):
+        self.players.pop(player_id, None)
                 
     def get_player(self, player_id: str):
         return self.players.get(player_id)

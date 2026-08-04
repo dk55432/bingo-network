@@ -17,5 +17,7 @@ class ConnectionManager:
             await connection.send_text(message)
             
     async def send_to_player(self, websocket, message):
+        if websocket is None:
+            return
         await websocket.send_text(message)        
     

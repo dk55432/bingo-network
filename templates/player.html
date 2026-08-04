@@ -37,6 +37,7 @@
         <button id="testCard2">Load test card 2</button>
         <button id="testCard3">Load test card 3</button>
         <button id="disposeCards">Dispose of current cards</button>
+        <button id="startFresh">Start fresh, forget previous session</button>
 <p>
 Status:
 <span id="status">Disconnected</span>
@@ -59,30 +60,29 @@ Status:
 const socket = new WebSocket("ws://127.0.0.1:8000/ws");
 
 socket.onopen = function() {
-
     console.log("Player socket connected");
-    
     const player_id = localStorage.getItem("player_id");
     socket.send(JSON.stringify({
         type: "reconnect",
         player_id: player_id
     }));
-
-    document.getElementById("status").textContent =
-        "Connected";
-
+    document.getElementById("status").textContent = "Connected";
 };
 
+socket.onclose = function() {
+    console.log("Join WebSocket closed");
+    document.getElementById("status").textContent = "Disonnected";
+    console.log("onclose: Do I need to wipe out the cache and redirect?");
+};
 
 socket.onmessage = function(event) {
-
     const data = JSON.parse(event.data);
     if (data.type === "reconnected") {
         console.log("Reconnect successful");
     }
     else if (data.type === "reconnect_failed") {
         localStorage.removeItem("player_id");
-        window.location.href = "/";
+        window.location.href = "/join";
     }
     else if (data.type === "number_called") {
         document.getElementById("currentNumber").textContent =
@@ -106,7 +106,9 @@ socket.onmessage = function(event) {
         draw_card(data.card)
     }
     else if (data.type === "left") {
+        console.log("Received 'left' message, shutting down..")
         localStorage.removeItem("player_id");
+        socket.close();
         window.location.href = "/join";
     }
     else if (data.type === "new_game") {
@@ -117,14 +119,13 @@ socket.onmessage = function(event) {
     }
 };
 
-socket.onclose = function() {
-    console.log("Join WebSocket closed");
-};
 
 document.getElementById("leaveGameButton").onclick = function() {
-    console.log("Pressed leaveGameButton")
+    console.log("Pressed leaveGameButton, sending 'leave' msg to server.")
+    const player_id = localStorage.getItem("player_id");
     socket.send(JSON.stringify({
-        type: "leave"
+        type: "leave",
+        player_id: player_id
     }));
 }
 
@@ -135,6 +136,12 @@ document.getElementById("disposeCards").onclick = function() {
         type: "dispose_cards",
         player_id: player_id,
     }));
+}
+
+document.getElementById("startFresh").onclick = function() {
+    console.log("pressed startFresh");
+    localStorage.removeItem("player_id");
+    window.location.href = "/join";
 }
 
 
