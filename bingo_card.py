@@ -74,7 +74,6 @@ class BingoCard:
 
 
     def to_dict(self):
-
         return {
             "card_id": self.card_id,
             "grid": self.grid,
