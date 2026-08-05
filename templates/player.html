@@ -122,10 +122,12 @@ socket.onmessage = function(event) {
     else if (data.type === "number_called") {
         console.log("number_called: ", data.number);
         showCurrentNumber(data.number);
+        markCalledNumber(data.number);
     }
     else if (data.type === "history") {
         console.log("History:", data.called_numbers);
         document.getElementById("calledNumbers").textContent= data.called_numbers;
+        mark_cards(data.called_numbers);
     }
     else if (data.type === "winner") {
         console.log("WINNER!", data.winners);
@@ -243,7 +245,7 @@ function draw_cards(cards) {
     }
 }
 
-function draw_card(card, container, number) {
+function draw_card_OLD(card, container, number) {
     let html = "";
     html += '<table class="bingo-card">';
 
@@ -277,6 +279,49 @@ function draw_card(card, container, number) {
     html += "</table>";
 
     container.innerHTML = html;
+}
+
+function draw_card(card, container, number) {
+  let html = "";
+  html += '<table class="bingo-card">';
+  html += `<tr><th colspan="5">Card ${number}</th></tr>`;
+
+  html += "<tr>";
+  html += "<th>B</th><th>I</th><th>N</th><th>G</th><th>O</th>";
+  html += "</tr>";
+
+  for (let row = 0; row < 5; row++) {
+    html += "<tr>";
+    for (let col = 0; col < 5; col++) {
+      const value = card.grid[row][col]; // e.g. "G52"
+      const isMarked = card.marked[row][col];
+
+      html += `<td data-bingo="${value}"${isMarked ? ' class="marked"' : ''}>${value}</td>`;
+    }
+    html += "</tr>";
+  }
+
+  html += "</table>";
+  container.innerHTML = html;
+}
+
+function mark_cards(called_numbers) {
+  const container = document.getElementById("cards");
+
+  for (const num of called_numbers) {
+    container
+      .querySelectorAll(`td[data-bingo="${CSS.escape(num)}"]`)
+      .forEach(td => td.classList.add("marked"));
+  }
+}
+
+
+function markCalledNumber(calledNumber) {
+  const container = document.getElementById("cards");
+
+  container
+    .querySelectorAll(`td[data-bingo="${CSS.escape(calledNumber)}"]`)
+    .forEach(td => td.classList.add("marked"));
 }
 
 function handle_winners(winners) {

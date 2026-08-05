@@ -13,6 +13,7 @@ app = FastAPI()
 manager = ConnectionManager()
 game = GameState()
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 templates = Jinja2Templates(directory="templates")
 
 @app.get("/")
@@ -67,7 +68,7 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
 
             message = await websocket.receive_text()
-            logger.info("Received:", message)
+            logger.info("Received: %s", message)
 
             try:
                 data = json.loads(message)
@@ -123,7 +124,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Debug
                 logger.debug("Post-join: Players:")
                 for player in game.players.values():
-                    logger.debug(
+                    print(
                         player.display_name,
                         player.connected,
                         player.websocket is not None
@@ -170,14 +171,14 @@ async def websocket_endpoint(websocket: WebSocket):
                             })
                         )
                         continue
-                    await manager.send_to_player( player.websocket,
-                        json.dumps({
-                            "type": "cards",
-                            "cards": cards_to_dict(player.cards)
-                        })
-                    )            
+                    # await manager.send_to_player( player.websocket,
+                    #     json.dumps({
+                    #         "type": "cards",
+                    #         "cards": cards_to_dict(player.cards)
+                    #     })
+                    # )            
         
-                logger.debug("WINNERS:", winners)
+                logger.debug("WINNERS: %s", winners)
 
                 await manager.broadcast(
                     json.dumps({
@@ -240,7 +241,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Debug
                 logger.debug("Post-reconnect: Players:")
                 for player in game.players.values():
-                    logger.debug(
+                    print(
                         player.display_name,
                         player.connected,
                         player.websocket is not None
@@ -287,8 +288,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         })
                     )
                     continue
-                logger.debug("In load_test_cards block, player ", str(player),
-                      " will load grid ", number);
+                logger.debug("In load_test_cards block, player "+ str(player)+
+                      " will load grid "+ str(number));
                 # player.dispose_cards() 
                 player.add_card(create_test_card(player, number))
                 await manager.send_to_player( websocket,
@@ -374,14 +375,14 @@ async def websocket_endpoint(websocket: WebSocket):
         # Debug
         logger.debug("Post-disconnect: Players:")
         for player in game.players.values():
-            logger.debug(
+            print(
                 player.display_name,
                 player.connected,
                 player.websocket is not None
             )
 
 async def broadcast_history(game):
-    logger.info("broadcast_history: entering with game=", str(game))
+    logger.info("broadcast_history: entering with game="+ str(game))
     await manager.broadcast(
         json.dumps({
             "type": "history",
