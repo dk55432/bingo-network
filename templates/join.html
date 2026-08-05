@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html>
     <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>
             Join a bingo game
         </title>
@@ -23,8 +24,11 @@ WebSocket Status:
 </p>
 
         <script>
+            const protocol =
+                window.location.protocol === "https:" ? "wss:" : "ws:";
+
             const socket = new WebSocket(
-                "ws://127.0.0.1:8000/ws"
+                `${protocol}//${window.location.host}/ws`
             );
 
             document.getElementById("joinButton").onclick = function() {

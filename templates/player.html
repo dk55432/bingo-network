@@ -2,6 +2,7 @@
 <html>
     <head>
         <link rel="icon" href="data:,">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
             table {
                 border-collapse: collapse;
@@ -67,7 +68,12 @@ Game Status: <div id="gameStatus">Connecting...</div>
 
 <script>
 
-const socket = new WebSocket("ws://127.0.0.1:8000/ws");
+const protocol =
+    window.location.protocol === "https:" ? "wss:" : "ws:";
+
+const socket = new WebSocket(
+    `${protocol}//${window.location.host}/ws`
+);
 
 socket.onopen = function() {
     console.log("Player socket connected");
@@ -235,12 +241,27 @@ function draw_card(card, container) {
 }
 
 function handle_winners(winners) {
-    str = "The following card(s) have BINGO:\n";
-    for (const winner of winners) {
-        str += winner.display_name + " ";
-        str += winner.card_id + "\n";
+    let str = "";
+    const myPlayerId = localStorage.getItem("player_id");
+    const myWins = winners.filter(
+        winner => winner.player_id === myPlayerId
+    );
+    if (myWins.length > 0) {
+        str += "BINGO! You won on these cards:\n";
+        for (const myWin of myWins) {
+            str += myWin.card_id + "\n";
+        }
+        alert(str);
+    } else {
+        str = "BINGO called by:\n";
+        for (const winner of winners) {
+            str += winner.display_name + " ";
+            str += winner.card_id + "\n";
+        }
+        // showMessage(str);
+        // document.getElementById("gameStatus").innerText = str;
+        document.getElementById("currentNumber").innerText = str;
     }
-    alert(str);
 }
 </script>
 

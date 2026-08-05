@@ -2,6 +2,7 @@
 <html>
 
 <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Bingo Host</title>
     <style>
         td.marked { background: yellow; }
@@ -59,7 +60,13 @@ WebSocket Status:
 <script>
 
 let pendingNumber = null;
-const socket = new WebSocket("ws://127.0.0.1:8000/ws");
+
+const protocol =
+    window.location.protocol === "https:" ? "wss:" : "ws:";
+
+const socket = new WebSocket(
+    `${protocol}//${window.location.host}/ws`
+);
 
 socket.onmessage = function(event) {
     const data = JSON.parse(event.data);
@@ -203,7 +210,7 @@ document.getElementById("setupNewGameButton").onclick = function() {
     // 3 = CLOSED
     console.log("setupNewGameButton: readyState=", socket.readyState);
     try {
-        console.log("setupNewGameButton: about to send msg: "+message);
+        console.log("setupNewGameButton: about to send msg: ", message);
         socket.send(JSON.stringify(message));
         console.log("setupNewGameButton: send completed");
     }

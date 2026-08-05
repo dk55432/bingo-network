@@ -287,8 +287,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     )
                     continue
                 print("In load_test_cards block, player "+str(player)
-                      +" will load grid "+str(number))
-                player.dispose_cards() # DAVE: Do I need to do this?
+                      +" will load all grids")
+                player.dispose_cards() 
                 player.add_card(create_test_card("test card", "1"))
                 player.add_card(create_test_card("test card", "2"))
                 player.add_card(create_test_card("test card", "3"))
