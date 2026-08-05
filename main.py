@@ -108,8 +108,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 )
                 await manager.send_to_player( player.websocket,
                     json.dumps({
-                        "type": "card",
-                        "card": player.cards[0].to_dict()
+                        "type": "cards",
+                        "cards": cards_to_dict(player.cards)
                     })
                 )            
                 await manager.send_to_player( player.websocket,
@@ -169,13 +169,12 @@ async def websocket_endpoint(websocket: WebSocket):
                             })
                         )
                         continue
-                    await manager.send_to_player(
-                        player.websocket,
+                    await manager.send_to_player( player.websocket,
                         json.dumps({
-                            "type": "card_update",
-                            "card": update["card"]
+                            "type": "cards",
+                            "cards": cards_to_dict(player.cards)
                         })
-                    )
+                    )            
         
                 print("WINNERS:", winners)
 
@@ -226,15 +225,15 @@ async def websocket_endpoint(websocket: WebSocket):
                 if len(player.cards) == 0:
                     await manager.send_to_player( websocket,
                         json.dumps({
-                            "type": "card",
-                            "card": None
+                            "type": "cards",
+                            "cards": None
                         })
                     ) 
                 else:
                     await manager.send_to_player( websocket,
                         json.dumps({
-                            "type": "card",
-                            "card": player.cards[0].to_dict()
+                            "type": "cards",
+                            "cards": cards_to_dict(player.cards)
                         })
                     ) 
                 # Debug
@@ -264,9 +263,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 )
             
             # TODO: This goes away when we implement OCR scanning / card inputs.
-            elif data["type"] == "load_test_card":
+            elif data["type"] == "load_test_cards":
                 if game.status != GameStatus.SETUP:
-                    print("load_test_card: Can only load card during status SETUP")
+                    print("load_test_cards: Can only load cards during status SETUP")
                     await manager.send_to_player(
                         websocket,
                         json.dumps({
@@ -287,14 +286,16 @@ async def websocket_endpoint(websocket: WebSocket):
                         })
                     )
                     continue
-                print("In load_test_card block, player "+str(player)
+                print("In load_test_cards block, player "+str(player)
                       +" will load grid "+str(number))
                 player.dispose_cards() # DAVE: Do I need to do this?
-                player.add_card(create_test_card("test card", number))
+                player.add_card(create_test_card("test card", "1"))
+                player.add_card(create_test_card("test card", "2"))
+                player.add_card(create_test_card("test card", "3"))
                 await manager.send_to_player( websocket,
                     json.dumps({
-                        "type": "card",
-                        "card": player.cards[0].to_dict()
+                        "type": "cards",
+                        "cards": cards_to_dict(player.cards)
                     })
                 )     
                            
@@ -317,8 +318,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 print("after disposeCards for player "+ str(player))
                 await manager.send_to_player( websocket,
                     json.dumps({
-                        "type": "card",
-                        "card": []
+                        "type": "cards",
+                        "cards": []
                     })
                 )   
                   
@@ -389,6 +390,12 @@ async def broadcast_history(game):
         })
     )
 
+def cards_to_dict(cards):
+    return [
+        card.to_dict()
+        for card in cards
+    ]
+
 async def send_cards_to_player(player: Player):
     print("send_cards_to_player: player = "+str(player))
     if player.websocket is None:
@@ -397,15 +404,15 @@ async def send_cards_to_player(player: Player):
         await manager.send_to_player(
             player.websocket,
             json.dumps({
-                "type": "card",
-                "card": player.cards[0].to_dict()
+                "type": "cards",
+                "cards": cards_to_dict(player.cards)
             })
         )     
     else:
         await manager.broadcast(
             json.dumps({
-                "type": "card",
-                "card": []
+                "type": "cards",
+                "cards": []
             })
         )     
             

@@ -1,0 +1,12 @@
+| Client → Server | Server → Client |
+| --------------- | --------------- |
+| join            | joined          |
+| reconnect       | reconnected     |
+| leave           | left            |
+| setup_new_game  | game_status     |
+| start_game      | game_status     |
+| game_over       | game_status     |
+| submit_number   | number_called   |
+| ...             | history         |
+| ...             | winner          |
+| ...             | cards           |

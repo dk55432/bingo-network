@@ -75,7 +75,9 @@ class GameState:
             player.dispose_cards()
         self.set_game_status(GameStatus.SETUP)
         
-            
+    # Returns a dict of 2 arrays: 
+    #   - winners: array of dicts { player_id, display_name, card_id }
+    #   - updated_cards: array of dicts { player_id, card }
     def call_number(self, number):
         if self.has_called(number):
             print("game.call_number: number "+str(number)+" is already called, returning.")
@@ -100,6 +102,7 @@ class GameState:
                 if card.has_bingo():
                     winners.append({
                         "player_id": player.player_id,
+                        "display_name": player.display_name,
                         "card_id": card.card_id
                     })
         return {
@@ -110,10 +113,11 @@ class GameState:
     def find_winners(self):
         winners = []
         for player in self.players.values():
+            display_name = player.display_name
             for card in player.cards:
                 if card.has_bingo():
                     winners.append(
-                        (player, card)
+                        (player, display_name, card)
                     )
         return winners
         

@@ -25,6 +25,16 @@
                 font-weight: bold;
             }
 
+            #cards {
+                display: flex;
+                overflow-x: auto;
+                gap: 20px;
+            }
+
+            .bingo-card {
+                flex: 0 0 auto;
+            }
+
         </style> 
     </head>
 <body>
@@ -34,9 +44,7 @@
         <button id="leaveGameButton">
             Leave Game
         </button>
-        <button id="testCard1">Load test card 1</button>
-        <button id="testCard2">Load test card 2</button>
-        <button id="testCard3">Load test card 3</button>
+        <button id="testCards">Load test cards 1-3</button>
         <button id="disposeCards">Dispose of current cards</button>
         <button id="startFresh">Start fresh, forget previous session</button>
 <p>
@@ -54,7 +62,7 @@ Game Status: <div id="gameStatus">Connecting...</div>
     ---
 </div>
 
-<div id="card"></div>
+<div id="cards"></div>
 
 
 <script>
@@ -87,12 +95,13 @@ socket.onmessage = function(event) {
         console.log("Reconnect successful");
     }
     else if (data.type === "reconnect_failed") {
+        console.log("reconnect_failed, redirecting to login page.")
         localStorage.removeItem("player_id");
         window.location.href = "/join";
     }
     else if (data.type === "number_called") {
-        document.getElementById("currentNumber").textContent =
-            data.number;
+        console.log("number_called: ", data.number);
+        showCurrentNumber(data.number);
     }
     else if (data.type === "history") {
         console.log("History:", data.called_numbers);
@@ -100,16 +109,15 @@ socket.onmessage = function(event) {
     }
     else if (data.type === "winner") {
         console.log("WINNER!", data.winners);
-        alert("BINGO!");
+        handle_winners(data.winners);
+        // alert("BINGO!");
     } 
-    // TODO:  Change "card" to "cards"
-    else if (data.type === "card") {
-        console.log("Received card:", data.card);
-        draw_card(data.card)
+    else if (data.type === "cards") {
+        console.log("Received cards:", data.cards);
+        draw_cards(data.cards)
     }
-    else if (data.type === "card_update") {
-        console.log("Updated card: ", data.card);
-        draw_card(data.card)
+    else if (data.type === "cards_update") {
+        alert("cards_update is DEPRECATED, fix this server call")
     }
     else if (data.type === "left") {
         console.log("Received 'left' message, shutting down..")
@@ -121,7 +129,7 @@ socket.onmessage = function(event) {
         console.log("new_game");
         document.getElementById("currentNumber").textContent = "---";
         document.getElementById("calledNumbers").textContent= "";
-        draw_card( [] )
+        draw_cards( [] )
     }
     else if (data.type === "game_status") {
         document.getElementById("gameStatus").innerText =
@@ -133,7 +141,6 @@ socket.onmessage = function(event) {
     else if (data.type === "action_rejected") {
         alert(data.action + ": " + data.reason)
     }
-
 };
 
 
@@ -157,49 +164,45 @@ document.getElementById("disposeCards").onclick = function() {
 
 document.getElementById("startFresh").onclick = function() {
     console.log("pressed startFresh");
+    // Tell the server we're leaving, so it can clean up on its end.
+    const player_id = localStorage.getItem("player_id");
+    socket.send(JSON.stringify({
+        type: "leave",
+        player_id: player_id,
+    }));
     localStorage.removeItem("player_id");
     window.location.href = "/join";
 }
 
 
-// TODO: These test-card handlers go away when we add OCR scanning.
-document.getElementById("testCard1").onclick = function() {
-    console.log("pressed load test card 1")
+// TODO: This test-card handler goes away when we add OCR scanning.
+document.getElementById("testCards").onclick = function() {
+    console.log("pressed load test cards")
     const player_id = localStorage.getItem("player_id");
     socket.send(JSON.stringify({
-        type: "load_test_card",
+        type: "load_test_cards",
         player_id: player_id,
-        number: "1"
-    }));
-}
-document.getElementById("testCard2").onclick = function() {
-    console.log("pressed load test card 2")
-    const player_id = localStorage.getItem("player_id");
-    socket.send(JSON.stringify({
-        type: "load_test_card",
-        player_id: player_id,
-        number: "2"
-    }));
-}
-document.getElementById("testCard3").onclick = function() {
-    console.log("pressed load test card 3")
-    const player_id = localStorage.getItem("player_id");
-    socket.send(JSON.stringify({
-        type: "load_test_card",
-        player_id: player_id,
-        number: "3"
+        number: "1"   // DAVE: the number is ignored on the server, it loads all 3.
     }));
 }
 
+function showCurrentNumber(number) {
+    document.getElementById("currentNumber").textContent = number;
+}
 
-// TODO: handle multiple tables.
-function draw_card(card) {
-    const container = document.getElementById("card");
-    if (card==null || card.length == 0) {
-        container.innerHTML = "<p>No cards loaded.</p>";
-        return;
+function draw_cards(cards) {
+    const container = document.getElementById("cards");
+    container.innerHTML = "";
+
+    for (const card of cards) {
+        const cardDiv = document.createElement("div");
+        cardDiv.className = "bingo-card";
+        draw_card(card, cardDiv);
+        container.appendChild(cardDiv);
     }
+}
 
+function draw_card(card, container) {
     let html = "";
     html += "<table>";
 
@@ -231,6 +234,14 @@ function draw_card(card) {
     container.innerHTML = html;
 }
 
+function handle_winners(winners) {
+    str = "The following card(s) have BINGO:\n";
+    for (const winner of winners) {
+        str += winner.display_name + " ";
+        str += winner.card_id + "\n";
+    }
+    alert(str);
+}
 </script>
 
 </body>

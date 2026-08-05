@@ -100,7 +100,8 @@ socket.onmessage = function(event) {
     }
     else if (data.type === "winner") {
         console.log("WINNER!", data.winners);
-        alert("BINGO!");
+        // alert("BINGO!");
+        handle_winners(data.winners);
     } 
 }
 
@@ -138,6 +139,15 @@ function drawHostBoard(called_numbers) {
     const cell = document.getElementById(`cell-${letter}${num}`);
     if (cell) cell.classList.add("marked");
   }
+}
+
+function handle_winners(winners) {
+    str = "The following card(s) have BINGO:\n";
+    for (const winner of winners) {
+        str += winner.display_name + " ";
+        str += winner.card_id + "\n";
+    }
+    alert(str);
 }
 
 
