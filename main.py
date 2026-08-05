@@ -7,11 +7,12 @@ from connection_manager import ConnectionManager
 from game import GameState, GameStatus, canonicalize_number
 from player import Player
 from bingo_card_factory import create_test_card
+import logging
 
 app = FastAPI()
 manager = ConnectionManager()
 game = GameState()
-
+logger = logging.getLogger(__name__)
 templates = Jinja2Templates(directory="templates")
 
 @app.get("/")
@@ -53,31 +54,31 @@ def disconnect_player(websocket):
         if player.websocket == websocket:
             player.connected = False
             player.websocket = None
-            print(f"{player.display_name} disconnected")
+            logger.debug(f"{player.display_name} disconnected")
             break
         
         
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
-    print(f"Clients connected: {len(manager.active_connections)}")
+    logger.info(f"Clients connected: {len(manager.active_connections)}")
 
     try:
         while True:
 
             message = await websocket.receive_text()
-            print("Received:", message)
+            logger.info("Received:", message)
 
             try:
                 data = json.loads(message)
 
             except json.JSONDecodeError:
-                print(f"Invalid JSON received: {message!r}")
+                logger.info(f"Invalid JSON received: {message!r}")
                 continue
             
             if data["type"] == "join":
                 if game.status != GameStatus.SETUP:
-                    print("join: can only join during SETUP")
+                    logger.info("join: can only join during SETUP")
                     await manager.send_to_player(
                         websocket,
                         json.dumps({
@@ -120,9 +121,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 )
     
                 # Debug
-                print("Post-join: Players:")
+                logger.debug("Post-join: Players:")
                 for player in game.players.values():
-                    print(
+                    logger.debug(
                         player.display_name,
                         player.connected,
                         player.websocket is not None
@@ -130,7 +131,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 
             elif data["type"] == "submit_number":
                 if game.status != GameStatus.IN_PROGRESS:
-                    print("submit_number: cannot submit number unless status IN_PROGRESS.")
+                    logger.info("submit_number: cannot submit number unless status IN_PROGRESS.")
                     await manager.send_to_player(
                         websocket,
                         json.dumps({
@@ -142,9 +143,9 @@ async def websocket_endpoint(websocket: WebSocket):
                     continue
                 
                 number = canonicalize_number(data["value"])
-                print("submit_number: just received number: " + str(number))
+                logger.info("submit_number: just received number: " + str(number))
                 result = game.call_number(number)
-                print("submit_number: broadcasting Hx: "+str(game.called_numbers))
+                logger.debug("submit_number: broadcasting Hx: "+str(game.called_numbers))
                 await manager.broadcast(
                     json.dumps({
                         "type": "history",
@@ -155,9 +156,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 winners = result["winners"]
                 updated_cards = result["updated_cards"]
                 
-                print("UPDATED CARDS:")
+                logger.debug("UPDATED CARDS:")
                 for update in updated_cards:
-                    print(update)
+                    logger.debug(update)
                     
                 for update in updated_cards:
                     player = game.players[update["player_id"]]
@@ -176,7 +177,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         })
                     )            
         
-                print("WINNERS:", winners)
+                logger.debug("WINNERS:", winners)
 
                 await manager.broadcast(
                     json.dumps({
@@ -192,7 +193,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             "winners": winners
                         })
                     )
-                    print("WINNER EVENT SENT")        
+                    logger.info("WINNER EVENT SENT")        
         
             elif data["type"] == "reconnect":
                 player_id = data["player_id"]
@@ -237,9 +238,9 @@ async def websocket_endpoint(websocket: WebSocket):
                         })
                     ) 
                 # Debug
-                print("Post-reconnect: Players:")
+                logger.debug("Post-reconnect: Players:")
                 for player in game.players.values():
-                    print(
+                    logger.debug(
                         player.display_name,
                         player.connected,
                         player.websocket is not None
@@ -265,7 +266,7 @@ async def websocket_endpoint(websocket: WebSocket):
             # TODO: This goes away when we implement OCR scanning / card inputs.
             elif data["type"] == "load_test_cards":
                 if game.status != GameStatus.SETUP:
-                    print("load_test_cards: Can only load cards during status SETUP")
+                    logger.info("load_test_cards: Can only load cards during status SETUP")
                     await manager.send_to_player(
                         websocket,
                         json.dumps({
@@ -286,7 +287,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         })
                     )
                     continue
-                print("In load_test_cards block, player ", str(player),
+                logger.debug("In load_test_cards block, player ", str(player),
                       " will load grid ", number);
                 # player.dispose_cards() 
                 player.add_card(create_test_card(player, number))
@@ -298,7 +299,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 )     
                            
             elif data["type"] == "dispose_cards":
-                print("Entering disposeCards block")
+                logger.info("Entering disposeCards block")
                 player_id = data["player_id"]
                 player = game.get_player(player_id)
                 if player is None:
@@ -309,11 +310,11 @@ async def websocket_endpoint(websocket: WebSocket):
                         })
                     )
                     continue
-                print("disposeCards for player "+ str(player))
+                logger.debug("disposeCards for player "+ str(player))
                 # DAVE: null player when server restarts but browser doesn't.
                 if player is not None:
                     player.dispose_cards()
-                print("after disposeCards for player "+ str(player))
+                logger.debug("after disposeCards for player "+ str(player))
                 await manager.send_to_player( websocket,
                     json.dumps({
                         "type": "cards",
@@ -322,7 +323,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 )   
                   
             elif data["type"] == "setup_new_game":
-                print("setup_new_game block")
+                logger.info("setup_new_game block")
                 game.setup_new_game() # Also sets status to SETUP
                 await manager.broadcast(
                     json.dumps({
@@ -340,7 +341,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     await send_cards_to_player(player)
                 
             elif data["type"] == "start_game":
-                print("start_game: switch status to IN_PROGRESS")
+                logger.info("start_game: switch status to IN_PROGRESS")
                 game.set_game_status(GameStatus.IN_PROGRESS)
                 await manager.broadcast(
                     json.dumps({
@@ -349,7 +350,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     })
                 )
             elif data["type"] == "request_game_status":
-                print("request_game_status: sending status "+str(game.status)+" to client")
+                logger.debug("request_game_status: sending status "+str(game.status)+" to client")
                 await manager.send_to_player( websocket,
                     json.dumps({
                         "type": "game_status",
@@ -358,7 +359,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 )     
             elif data["type"] == "game_over":
                 game.set_game_status(GameStatus.GAME_OVER)
-                print("game_over: broadcasting status=GAME_OVER change")
+                logger.info("game_over: broadcasting status=GAME_OVER change")
                 await manager.broadcast(
                     json.dumps({
                         "type": "game_status",
@@ -369,18 +370,18 @@ async def websocket_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         disconnect_player(websocket)
 
-        print(f"Clients connected: {len(manager.active_connections)}")
+        logger.info(f"Clients connected: {len(manager.active_connections)}")
         # Debug
-        print("Post-disconnect: Players:")
+        logger.debug("Post-disconnect: Players:")
         for player in game.players.values():
-            print(
+            logger.debug(
                 player.display_name,
                 player.connected,
                 player.websocket is not None
             )
 
 async def broadcast_history(game):
-    print("broadcast_history: entering with game=", str(game))
+    logger.info("broadcast_history: entering with game=", str(game))
     await manager.broadcast(
         json.dumps({
             "type": "history",
@@ -395,7 +396,7 @@ def cards_to_dict(cards):
     ]
 
 async def send_cards_to_player(player: Player):
-    print("send_cards_to_player: player = "+str(player))
+    logger.info("send_cards_to_player: player = "+str(player))
     if player.websocket is None:
         return
     if player.cards is not None and len(player.cards) > 0:

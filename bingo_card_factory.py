@@ -23,7 +23,7 @@ def create_test_card(player: Player, whichGrid: int):
         ["B4",  "I19", "N34", "G49", "O64"],
         ["B5",  "I20", "N35", "G50", "O65"],
     ]
-    print("Player is: ", player)
+    print("Player is: ", player.display_name)
     count = len(player.cards)
     if 1 == whichGrid:
         _grid = grid1

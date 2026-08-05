@@ -1,5 +1,8 @@
 from player import Player
 from enum import Enum
+import logging
+
+logger = logging.getLogger(__name__)
 
 class GameStatus(Enum):
     SETUP = "setup"
@@ -63,7 +66,7 @@ class GameState:
     
     # It's expected that the code in main.py will broadcast the status change.
     def set_game_status(self, status: Enum):
-        print("set_game_status: Setting status to: " + str(status))
+        logger.debug("set_game_status: Setting status to: " + str(status))
         self.status = status
         return {"type": "game_status", "status": status}
         
@@ -80,7 +83,7 @@ class GameState:
     #   - updated_cards: array of dicts { player_id, card }
     def call_number(self, number):
         if self.has_called(number):
-            print("game.call_number: number "+str(number)+" is already called, returning.")
+            logger.info("game.call_number: number "+str(number)+" is already called, returning.")
             return {
                 "winners": [],
                 "updated_cards": []
