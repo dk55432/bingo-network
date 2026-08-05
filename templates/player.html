@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html>
     <head>
+        <link rel="icon" href="data:,">
         <style>
             table {
                 border-collapse: collapse;
@@ -39,9 +40,10 @@
         <button id="disposeCards">Dispose of current cards</button>
         <button id="startFresh">Start fresh, forget previous session</button>
 <p>
-Status:
+WebSocket Status:
 <span id="status">Disconnected</span>
 </p>
+Game Status: <div id="gameStatus">Connecting...</div>
 <p>Called Numbers: <span id="calledNumbers"></span></p>
 
 <div id="currentNumber"
@@ -67,11 +69,15 @@ socket.onopen = function() {
         player_id: player_id
     }));
     document.getElementById("status").textContent = "Connected";
+    console.log("Requesting game status");
+    socket.send(JSON.stringify({
+        type: "request_game_status"
+    }));
 };
 
 socket.onclose = function() {
     console.log("Join WebSocket closed");
-    document.getElementById("status").textContent = "Disonnected";
+    document.getElementById("status").textContent = "Disconnected";
     console.log("onclose: Do I need to wipe out the cache and redirect?");
 };
 
@@ -117,6 +123,17 @@ socket.onmessage = function(event) {
         document.getElementById("calledNumbers").textContent= "";
         draw_card( [] )
     }
+    else if (data.type === "game_status") {
+        document.getElementById("gameStatus").innerText =
+            "Game Status: "+data.status;
+            //TODO: disable / enable anything?
+            // Update our status monitor
+            document.getElementById("gameStatus").innerText=data.status;
+    }
+    else if (data.type === "action_rejected") {
+        alert(data.action + ": " + data.reason)
+    }
+
 };
 
 

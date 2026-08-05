@@ -1,18 +1,27 @@
 from player import Player
+from enum import Enum
+
+class GameStatus(Enum):
+    SETUP = "setup"
+    IN_PROGRESS = "in_progress"
+    GAME_OVER = "game_over"
+
 
 class GameState:
     def __init__(self):
+        self.status = GameStatus.SETUP
         self.called_numbers = []
-        self.called_set = set()
+        # self.called_set = set()
         self.current_number: str | None = None
         self.players: dict[str, Player] = {}
-        print("NEW GAMESTATE CREATED")
         
     def __str__(self):
-        result = f"Players: {len(self.players)}\n"
+        result = f"status: {self.status}\n"
+        result += f"Players: {len(self.players)}\n"
         for player in self.players.values():
             result += str(player) + "\n"
-        # TODO: called_numbers, current_number
+        result += f"current_number: {self.current_number}\n"
+        result += f"called_numbers: {self.called_numbers}\n"
         return result
         
     def record_called_number(self, number):
@@ -20,11 +29,19 @@ class GameState:
         self.called_numbers.append(number)
     
     def clear_called_numbers(self):
-        self.called_numbers= []
-        self.called_set = set()
+        self.called_numbers.clear()
+        
+    def has_called(self, number):
+        return number in self.called_numbers
         
     def clear_current_number(self):
         self.current_number = None
+        
+    def set_current_number(self, number):
+        self.current_number = number
+        
+    def get_current_number(self):
+        return self.current_number
 
     def add_player(self, player: Player):
         self.players[player.player_id] = player
@@ -44,25 +61,30 @@ class GameState:
             for card in player.cards
         ]
     
-    def start_new_game(self):
-        self.called_numbers.clear()
-        self.called_set.clear()
-        self.current_number = None
+    # It's expected that the code in main.py will broadcast the status change.
+    def set_game_status(self, status: Enum):
+        print("set_game_status: Setting status to: " + str(status))
+        self.status = status
+        return {"type": "game_status", "status": status}
+        
+    
+    def setup_new_game(self):
+        self.clear_called_numbers()
+        self.clear_current_number()
         for player in self.players.values():
             player.dispose_cards()
+        self.set_game_status(GameStatus.SETUP)
         
             
     def call_number(self, number):
-        if number in self.called_set:
-            print("game.call_number: number "+str(number)+" is in called_set, returning.")
+        if self.has_called(number):
+            print("game.call_number: number "+str(number)+" is already called, returning.")
             return {
                 "winners": [],
                 "updated_cards": []
             }
     
-        self.current_number = number
-        self.called_numbers.append(number)
-        self.called_set.add(number)
+        self.record_called_number(number)
 
         winners = []
         updated_cards = []

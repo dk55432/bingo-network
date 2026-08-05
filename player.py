@@ -20,14 +20,10 @@ class Player:
     def __str__(self):
         result = f"Player: {self.player_id}\n"
         result += f"Display name: {self.display_name}\n"
-        result += f"Connected: {self.connected}\n"
+        result += f"Connected: {self.connected}, at {self.connected_at}\n"
         result += f"Cards: {len(self.cards)}\n"
-        
         for card in self.cards:
-            result += str(card) + "\n"
-        
-        result += f"Connected at: {self.connected_at}\n"
-        
+            result += str(card) + "\n"        
         return result
     
     def add_card(self, card: BingoCard):

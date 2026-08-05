@@ -1,7 +1,10 @@
 <!DOCTYPE html>
 <html>
     <head>
-        Join a bingo game
+        <title>
+            Join a bingo game
+        </title>
+        <link rel="icon" href="data:,">
     </head>
     <body>
         <h1>Join Bingo Game</h1>
@@ -11,6 +14,13 @@
         <button id="joinButton">
             Join
         </button>
+
+        <div id="errorMessage"></div>
+        <div id="gameStatus">Game Status: Connecting...</div>
+<p>
+WebSocket Status:
+<span id="status">Disconnected</span>
+</p>
 
         <script>
             const socket = new WebSocket(
@@ -28,6 +38,19 @@
                 socket.send(JSON.stringify(message));
             };            
 
+            socket.onopen = function() {
+                console.log("WebSocket connected");
+                console.log("Requesting game status");
+                socket.send(JSON.stringify({
+                    type: "request_game_status"
+                }));
+            }
+
+            socket.onclose = function() {
+                document.getElementById("errorMessage").innerText =
+                    "Server connection lost. Please reload.";
+            };
+
             socket.onmessage = function(event) {
 
                 const data = JSON.parse(event.data);
@@ -40,6 +63,15 @@
                     );
 
                     window.location.href = "/player";
+                }
+                else if (data.type === "action_rejected") {
+                    document.getElementById("errorMessage").innerText =
+                        "ERROR: " + data.reason;
+                }
+                else if (data.type === "game_status") {
+                    document.getElementById("gameStatus").innerText =
+                        "Game Status: "+data.status;
+                        //TODO: disable / enable anything?
                 }
 
             };            

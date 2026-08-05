@@ -5,8 +5,8 @@
     <title>Bingo Host</title>
     <style>
         td.marked { background: yellow; }
-
     </style>
+    <link rel="icon" href="data:,">
 </head>
 
 <body>
@@ -31,12 +31,27 @@ Called numbers: <div id="history"> --- </div>
 
 <div id="preview"></div>
 
+<div id="gameStatus">Game Status: SETUP</div>
+
+<p>
+WebSocket Status:
+<span id="status">Disconnected</span>
+</p>
+
 <button id="broadcastButton" disabled>
     Broadcast
 </button>
 
-<button id="startNewGameButton">
-    Start New Game
+<button id="setupNewGameButton">
+    Setup New Game
+</button>
+
+<button id="startGameButton">
+    Start Game
+</button>
+
+<button id="gameOverButton">
+    Game Over
 </button>
 
 <div id="hostBoard"></div>
@@ -47,8 +62,8 @@ let pendingNumber = null;
 const socket = new WebSocket("ws://127.0.0.1:8000/ws");
 
 socket.onmessage = function(event) {
-
     const data = JSON.parse(event.data);
+    console.log("Received message from socket: ", JSON.stringify(data, null, 2));
     if (data.type === "reconnected") {
         console.log("Reconnect successful");
     }
@@ -71,6 +86,22 @@ socket.onmessage = function(event) {
     else if (data.type === "new_game") {
         document.getElementById("currentNumber").textContent = "---";
     }
+    else if (data.type === "game_started") {
+        print("game_started")
+        // TODO: What needs to be done here?  Disable / enable some buttons (Preview, Broadcast)?
+    }
+    else if (data.type === "game_status") {
+        console.log("game_status: game status is now " + data.status)
+        // TODO:  Print the status on the screen.  Conditionally disable/enable buttons??
+        document.getElementById("gameStatus").textContent = "Game Status: "+data.status;
+    }
+    else if (data.type === "action_rejected") {
+        alert(data.action + ": " + data.reason)
+    }
+    else if (data.type === "winner") {
+        console.log("WINNER!", data.winners);
+        alert("BINGO!");
+    } 
 }
 
 function drawHostBoard(called_numbers) {
@@ -110,7 +141,6 @@ function drawHostBoard(called_numbers) {
 }
 
 
-
 document.getElementById("previewButton").onclick = function() {
     const value =
         document.getElementById("numberInput").value;
@@ -132,6 +162,15 @@ document.getElementById("previewButton").onclick = function() {
 
 socket.onopen = function() {
     console.log("Host connected");
+    document.getElementById("status").innerText = "Connected";
+    console.log("Requesting game status");
+    socket.send(JSON.stringify({
+        type: "request_game_status"
+    }));
+};
+
+socket.onclose = function(event) {
+    console.log("WebSocket closed", event);
 };
 
 document.getElementById("broadcastButton").onclick = function() {
@@ -142,10 +181,37 @@ document.getElementById("broadcastButton").onclick = function() {
     socket.send(JSON.stringify(message));
 };
 
-document.getElementById("startNewGameButton").onclick = function() {
+document.getElementById("setupNewGameButton").onclick = function() {
+    console.log("setupNewGameButton: sending setup_new_game");
     const message = {
-        type: "start_new_game",
-        // value: pendingNumber
+        type: "setup_new_game",
+    };
+    // Debug:  The readyState values are
+    // 0 = CONNECTING
+    // 1 = OPEN ✅
+    // 2 = CLOSING
+    // 3 = CLOSED
+    console.log("setupNewGameButton: readyState=", socket.readyState);
+    try {
+        console.log("setupNewGameButton: about to send msg: "+message);
+        socket.send(JSON.stringify(message));
+        console.log("setupNewGameButton: send completed");
+    }
+    catch (e) {
+        console.log("send failed: ", e)
+    }
+}
+
+document.getElementById("startGameButton").onclick = function() {
+    const message = {
+        type: "start_game",
+    };
+    socket.send(JSON.stringify(message));
+}
+
+document.getElementById("gameOverButton").onclick = function() {
+    const message = {
+        type: "game_over",
     };
     socket.send(JSON.stringify(message));
 }

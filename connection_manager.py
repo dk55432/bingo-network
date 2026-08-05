@@ -10,12 +10,24 @@ class ConnectionManager:
         self.active_connections.append(websocket)
 
     def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
 
     async def broadcast(self, message: str):
-        for connection in self.active_connections:
-            await connection.send_text(message)
+        dead_connections = []
+        # Debug
+        print("Broadcasting to:")
+        for i, ws in enumerate(self.active_connections):
+            print(i, ws)
             
+        for connection in self.active_connections:
+            try:
+                await connection.send_text(message)
+            except RuntimeError:
+                dead_connections.append(connection)
+        for connection in dead_connections:
+            self.disconnect(connection)
+                    
     async def send_to_player(self, websocket, message):
         if websocket is None:
             return

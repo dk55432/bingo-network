@@ -4,7 +4,7 @@ import json
 import uuid
 from datetime import datetime
 from connection_manager import ConnectionManager
-from game import GameState, canonicalize_number
+from game import GameState, GameStatus, canonicalize_number
 from player import Player
 from bingo_card_factory import create_test_card
 
@@ -76,6 +76,18 @@ async def websocket_endpoint(websocket: WebSocket):
                 continue
             
             if data["type"] == "join":
+                if game.status != GameStatus.SETUP:
+                    print("join: can only join during SETUP")
+                    await manager.send_to_player(
+                        websocket,
+                        json.dumps({
+                            "type": "action_rejected",
+                            "action": "join",
+                            "reason": "game_in_progress"
+                        })
+                    )
+                    continue
+                    
                 player = Player(
                     player_id = str(uuid.uuid4()),
                     display_name = data["display_name"],
@@ -117,6 +129,18 @@ async def websocket_endpoint(websocket: WebSocket):
                     )
                 
             elif data["type"] == "submit_number":
+                if game.status != GameStatus.IN_PROGRESS:
+                    print("submit_number: cannot submit number unless status IN_PROGRESS.")
+                    await manager.send_to_player(
+                        websocket,
+                        json.dumps({
+                            "type": "action_rejected",
+                            "action": "submit_number",
+                            "reason": "game_not_in_progress"
+                        })
+                    )
+                    continue
+                
                 number = canonicalize_number(data["value"])
                 print("submit_number: just received number: " + str(number))
                 result = game.call_number(number)
@@ -239,20 +263,19 @@ async def websocket_endpoint(websocket: WebSocket):
                                 "message": "Bye"})
                 )
             
-            elif data["type"] == "start_new_game":
-                print("start_new_game")
-                game.start_new_game()
-                await manager.broadcast(
-                    json.dumps({
-                        "type": "new_game"
-                    })
-                )
-                await broadcast_history(game)
-                for player in game.players:
-                    await send_cards_to_player(player)
-                
             # TODO: This goes away when we implement OCR scanning / card inputs.
             elif data["type"] == "load_test_card":
+                if game.status != GameStatus.SETUP:
+                    print("load_test_card: Can only load card during status SETUP")
+                    await manager.send_to_player(
+                        websocket,
+                        json.dumps({
+                            "type": "action_rejected",
+                            "reason": "Can only load cards during status SETUP"
+                        })
+                    )
+                    continue
+                
                 player_id = data["player_id"]
                 number = data["number"]
                 player = game.get_player(player_id)
@@ -297,8 +320,52 @@ async def websocket_endpoint(websocket: WebSocket):
                         "type": "card",
                         "card": []
                     })
-                )     
+                )   
+                  
+            elif data["type"] == "setup_new_game":
+                print("setup_new_game block")
+                game.setup_new_game() # Also sets status to SETUP
+                await manager.broadcast(
+                    json.dumps({
+                        "type": "new_game"
+                    })
+                )
+                await manager.broadcast(
+                    json.dumps({
+                        "type": "game_status",
+                        "status": str(game.status)
+                    })
+                )
+                await broadcast_history(game)
+                for player in game.players.values():
+                    await send_cards_to_player(player)
                 
+            elif data["type"] == "start_game":
+                print("start_game: switch status to IN_PROGRESS")
+                game.set_game_status(GameStatus.IN_PROGRESS)
+                await manager.broadcast(
+                    json.dumps({
+                        "type": "game_status",
+                        "status": str(game.status)
+                    })
+                )
+            elif data["type"] == "request_game_status":
+                print("request_game_status: sending status "+str(game.status)+" to client")
+                await manager.send_to_player( websocket,
+                    json.dumps({
+                        "type": "game_status",
+                        "status": str(game.status)
+                    })
+                )     
+            elif data["type"] == "game_over":
+                game.set_game_status(GameStatus.GAME_OVER)
+                print("game_over: broadcasting status=GAME_OVER change")
+                await manager.broadcast(
+                    json.dumps({
+                        "type": "game_status",
+                        "status": str(game.status)
+                    })
+                )
 
     except WebSocketDisconnect:
         disconnect_player(websocket)
@@ -314,6 +381,7 @@ async def websocket_endpoint(websocket: WebSocket):
             )
 
 async def broadcast_history(game):
+    print("broadcast_history: entering with game=", str(game))
     await manager.broadcast(
         json.dumps({
             "type": "history",
@@ -321,9 +389,13 @@ async def broadcast_history(game):
         })
     )
 
-async def send_cards_to_player(player):
+async def send_cards_to_player(player: Player):
+    print("send_cards_to_player: player = "+str(player))
+    if player.websocket is None:
+        return
     if player.cards is not None and len(player.cards) > 0:
-        await manager.broadcast(
+        await manager.send_to_player(
+            player.websocket,
             json.dumps({
                 "type": "card",
                 "card": player.cards[0].to_dict()
