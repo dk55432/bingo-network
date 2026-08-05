@@ -33,6 +33,7 @@ def create_test_card(card_id, whichGrid):
         _card_id = card_id + "_grid3"
     return BingoCard(
         card_id=_card_id,
+        display_name=whichGrid,
         player_id=None,
         grid=_grid
     )

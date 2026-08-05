@@ -4,6 +4,7 @@ class BingoCard:
     
     def __init__(self, 
                  card_id, 
+                 display_name,
                  player_id,
                  grid
                  ):
@@ -11,6 +12,7 @@ class BingoCard:
             self.card_id = str(uuid.uuid4())
         else:
             self.card_id = card_id
+        self.display_name = display_name
         self.player_id = player_id
         self.grid = grid
         self.marked = [
@@ -76,6 +78,7 @@ class BingoCard:
     def to_dict(self):
         return {
             "card_id": self.card_id,
+            "display_name": self.display_name,
             "grid": self.grid,
             "marked": self.marked
         }
