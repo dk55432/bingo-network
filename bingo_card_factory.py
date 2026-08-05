@@ -1,6 +1,7 @@
 from bingo_card import BingoCard
+from player import Player
 
-def create_test_card(card_id, whichGrid):
+def create_test_card(player: Player, whichGrid: int):
     grid1 = [
         ["B1",  "I16", "N31", "G46", "O61"],
         ["B2",  "I17", "N32", "G47", "O62"],
@@ -22,18 +23,18 @@ def create_test_card(card_id, whichGrid):
         ["B4",  "I19", "N34", "G49", "O64"],
         ["B5",  "I20", "N35", "G50", "O65"],
     ]
-    if "1"==whichGrid:
+    print("Player is: ", player)
+    count = len(player.cards)
+    if 1 == whichGrid:
         _grid = grid1
-        _card_id = card_id + "-grid1"
-    elif "2" == whichGrid:
+    elif 2 == whichGrid:
         _grid = grid2
-        _card_id = card_id + "_grid2"
     else:
         _grid = grid3
-        _card_id = card_id + "_grid3"
+    _card_id = str(count + 1)
     return BingoCard(
         card_id=_card_id,
-        display_name=whichGrid,
+        # display_name=whichGrid,
         player_id=None,
         grid=_grid
     )

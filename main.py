@@ -97,7 +97,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 # TODO: At some point we'll want to store mapping websocket -> player
                 
                 # TODO: eventually let users enter/scan their own cards.  For now, use test cards 1-3.
-                player.add_card(create_test_card(player.display_name, "1"))
+                player.add_card(create_test_card(player, 1))
                 game.add_player(player)
 
                 await manager.send_to_player( player.websocket,
@@ -276,7 +276,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     continue
                 
                 player_id = data["player_id"]
-                number = data["number"]
+                number = int(data["number"])
                 player = game.get_player(player_id)
                 if player is None:
                     await manager.send_to_player(
@@ -286,12 +286,10 @@ async def websocket_endpoint(websocket: WebSocket):
                         })
                     )
                     continue
-                print("In load_test_cards block, player "+str(player)
-                      +" will load all grids")
-                player.dispose_cards() 
-                player.add_card(create_test_card("test card", "1"))
-                player.add_card(create_test_card("test card", "2"))
-                player.add_card(create_test_card("test card", "3"))
+                print("In load_test_cards block, player ", str(player),
+                      " will load grid ", number);
+                # player.dispose_cards() 
+                player.add_card(create_test_card(player, number))
                 await manager.send_to_player( websocket,
                     json.dumps({
                         "type": "cards",

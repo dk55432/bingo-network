@@ -57,7 +57,9 @@
         <button id="leaveGameButton">
             Leave Game
         </button>
-        <button id="testCards">Load test cards 1-3</button>
+        <button id="testCard1">Load test card 1</button>
+        <button id="testCard2">Load test card 2</button>
+        <button id="testCard3">Load test card 3</button>
         <button id="disposeCards">Dispose of current cards</button>
         <button id="startFresh">Start fresh, forget previous session</button>
 <p>
@@ -194,13 +196,31 @@ document.getElementById("startFresh").onclick = function() {
 
 
 // TODO: This test-card handler goes away when we add OCR scanning.
-document.getElementById("testCards").onclick = function() {
+document.getElementById("testCard1").onclick = function() {
     console.log("pressed load test cards")
     const player_id = localStorage.getItem("player_id");
     socket.send(JSON.stringify({
         type: "load_test_cards",
         player_id: player_id,
-        number: "1"   // DAVE: the number is ignored on the server, it loads all 3.
+        number: "1"  
+    }));
+}
+document.getElementById("testCard2").onclick = function() {
+    console.log("pressed load test cards")
+    const player_id = localStorage.getItem("player_id");
+    socket.send(JSON.stringify({
+        type: "load_test_cards",
+        player_id: player_id,
+        number: "2"  
+    }));
+}
+document.getElementById("testCard3").onclick = function() {
+    console.log("pressed load test cards")
+    const player_id = localStorage.getItem("player_id");
+    socket.send(JSON.stringify({
+        type: "load_test_cards",
+        player_id: player_id,
+        number: "3"  
     }));
 }
 
@@ -212,20 +232,23 @@ function draw_cards(cards) {
     const container = document.getElementById("cards");
     container.innerHTML = "";
 
+    // let n=0;
     for (const card of cards) {
         const cardDiv = document.createElement("div");
         cardDiv.className = "bingo-card";
-        draw_card(card, cardDiv);
+        // n++;
+        let n = card.card_id;
+        draw_card(card, cardDiv, n);
         container.appendChild(cardDiv);
     }
 }
 
-function draw_card(card, container) {
+function draw_card(card, container, number) {
     let html = "";
     html += '<table class="bingo-card">';
 
     html += "<tr>";
-    html += '<th colspan="5">Card '+card.display_name+'</th>'
+    html += '<th colspan="5">Card '+number+'</th>'
     html += "</tr>";
 
     html += "<tr>";
@@ -263,22 +286,23 @@ function handle_winners(winners) {
         winner => winner.player_id === myPlayerId
     );
    
-    str = "BINGO called by:\n";
-    for (const winner of winners) {
-        str += winner.display_name + " ";
+    str = "BINGO called by:";
+    // for (const winner of winners) {
+    //     str += winner.display_name + " ";
         // str += winner.card_id + "\n";
-    }
+    // }
+    const names = winners.map(w => w.display_name);
+    str += names.join(", ");
     // showMessage(str);
     // document.getElementById("gameStatus").innerText = str;
     document.getElementById("currentNumber").innerText = str;
    
     if (myWins.length > 0) {
-        str += "BINGO! You won on these cards:\n";
+        str = "BINGO! You won on these cards:\n";
         for (const myWin of myWins) {
-            str += myWin.card_id + "\n";
+            str += "Card " + myWin.card_id + "\n";
         }
         alert(str);
-    } else {
     }
 }
 </script>
