@@ -6,6 +6,33 @@
     <title>Bingo Host</title>
     <style>
         td.marked { background: yellow; }
+
+        /* .hostBoard {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+        } */
+    #hostBoard {
+        max-height: 100vh;
+        overflow-y: auto;
+        }
+
+.host-cell {
+    width: 90px;
+    white-space: nowrap;
+    padding: 2px 4px;
+    text-align: center;
+}
+
+.host-num {
+    display: inline-block;
+    width: 38px;
+    text-align: center;
+    font-size: 18px;
+}
+
+.marked { background-color: yellow; font-weight: bold; }
+
+
     </style>
     <link rel="icon" href="data:,">
 </head>
@@ -82,13 +109,19 @@ socket.onmessage = function(event) {
         console.log("History:", data.called_numbers);
         const container = document.getElementById("hostBoard");
         container.innerHTML="";
-        drawHostBoard(data.called_numbers);
+        // drawHostBoard(data.called_numbers);
+        const el=document.getElementById("hostBoard");
+        el.innerHTML="";
+        // drawHostBoardDoubles(data.called_numbers);
+        drawHostBoardDoubles("hostBoard");
+
         const container2 = document.getElementById("history");
         container2.innerText = data.called_numbers;
     }
     else if (data.type === "number_called") {
         document.getElementById("currentNumber").textContent =
             data.number;
+        markCalledNumberHost(data.number);
     }
     else if (data.type === "new_game") {
         document.getElementById("currentNumber").textContent = "---";
@@ -112,7 +145,7 @@ socket.onmessage = function(event) {
     } 
 }
 
-function drawHostBoard(called_numbers) {
+function drawHostBoard_OLD(called_numbers) {
   const container = document.getElementById("hostBoard");
   if (called_numbers == null || called_numbers.length == 0) {
     container.innerHTML = ""
@@ -147,6 +180,59 @@ function drawHostBoard(called_numbers) {
     if (cell) cell.classList.add("marked");
   }
 }
+
+function drawHostBoardDoubles(containerId = "hostBoard") {
+  console.log("readyState:", document.readyState);
+  const container = document.getElementById(containerId);
+  console.log("found container?", !!container);
+  if (!container) {
+    console.error("Host board container not found:", containerId);
+    return;
+  }
+
+  const cols = [
+    { letter: "B", base: 1  },
+    { letter: "I", base: 16 },
+    { letter: "N", base: 31 },
+    { letter: "G", base: 46 },
+    { letter: "O", base: 61 },
+  ];
+
+  const rows = 8; // ceil(15/2)
+
+  let html = '<table class="host-board">';
+  html += "<tr>";
+  html += cols.map(c => `<th>${c.letter}</th>`).join("");
+  html += "</tr>";
+
+  for (let r = 0; r < rows; r++) {
+    html += "<tr>";
+    for (const c of cols) {
+      const n1 = c.base + r * 2;
+      const n2 = n1 + 1;
+
+      const show1 = n1 <= c.base + 14; // within 1..15 for that letter
+      const show2 = n2 <= c.base + 14;
+
+      html += `<td class="host-cell">
+        ${show1 ? `<span class="host-num" data-bingo="${c.letter}${n1}">${n1}</span>` : ""}
+        ${show2 ? `<span class="host-num" data-bingo="${c.letter}${n2}">${n2}</span>` : ""}
+      </td>`;
+    }
+    html += "</tr>";
+  }
+
+  html += "</table>";
+  container.innerHTML = html;
+}
+
+function markCalledNumberHost(calledNumber) {
+  const host = document.getElementById("hostBoard");
+  host.querySelectorAll(`.host-num[data-bingo="${CSS.escape(calledNumber)}"]`)
+      .forEach(el => el.classList.add("marked"));
+}
+
+
 
 function handle_winners(winners) {
     str = "The following card(s) have BINGO:\n";
@@ -223,6 +309,10 @@ document.getElementById("startGameButton").onclick = function() {
     const message = {
         type: "start_game",
     };
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+        console.log("WebSocket not open; readyState=", socket?.readyState);
+        return;
+    }
     socket.send(JSON.stringify(message));
 }
 
@@ -232,6 +322,10 @@ document.getElementById("gameOverButton").onclick = function() {
     };
     socket.send(JSON.stringify(message));
 }
+
+window.addEventListener("DOMContentLoaded", () => {
+  drawHostBoardDoubles("hostBoard");
+});
 
 </script>
 
