@@ -1,11 +1,11 @@
 from datetime import datetime
 
-from game import GameState
+from game import Game
 from player import Player
 from bingo_card_factory import create_test_card
 
 
-game = GameState()
+game = Game()
 
 
 player = Player(

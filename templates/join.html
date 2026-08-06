@@ -27,16 +27,32 @@ WebSocket Status:
             const protocol =
                 window.location.protocol === "https:" ? "wss:" : "ws:";
 
+            // A host shares a link like /join?game=<game_id>. Fall back to
+            // a previously-stored game_id (e.g. reloading this page after
+            // already having it once) if the URL doesn't have one.
+            const urlParams = new URLSearchParams(window.location.search);
+            const gameId = urlParams.get("game") || localStorage.getItem("game_id");
+
+            if (gameId) {
+                localStorage.setItem("game_id", gameId);
+            } else {
+                document.getElementById("errorMessage").innerText =
+                    "No game link found. Ask the host for the join link and open it again.";
+                document.getElementById("joinButton").disabled = true;
+            }
+
             const socket = new WebSocket(
                 `${protocol}//${window.location.host}/ws`
             );
 
             document.getElementById("joinButton").onclick = function() {
+                if (!gameId) return; // button is disabled in this case, but just in case
                 console.log("Join button clicked");
                 const message = {
                     type: "join",
                     display_name:
-                        document.getElementById("displayName").value
+                        document.getElementById("displayName").value,
+                    game_id: gameId
                 };
                 console.log(message);
                 socket.send(JSON.stringify(message));
@@ -44,9 +60,11 @@ WebSocket Status:
 
             socket.onopen = function() {
                 console.log("WebSocket connected");
+                if (!gameId) return;
                 console.log("Requesting game status");
                 socket.send(JSON.stringify({
-                    type: "request_game_status"
+                    type: "request_game_status",
+                    game_id: gameId
                 }));
             }
 

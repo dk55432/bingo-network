@@ -35,6 +35,7 @@
 
     </style>
     <link rel="icon" href="data:,">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 </head>
 
 <body>
@@ -66,6 +67,19 @@ WebSocket Status:
 <span id="status">Disconnected</span>
 </p>
 
+<div id="joinLinkBox" style="display:none; margin: 10px 0; padding: 8px; border: 1px solid #ccc;
+     align-items: center; justify-content: space-between; gap: 16px;">
+    <div>
+        Share this link with players:
+        <br>
+        <input id="joinLinkInput" type="text" readonly
+               style="width: 320px;" onclick="this.select()">
+        <button id="copyJoinLinkButton">Copy</button>
+        <span id="copyJoinLinkStatus"></span>
+    </div>
+    <div id="joinQrCode"></div>
+</div>
+
 <button id="broadcastButton" disabled>
     Broadcast
 </button>
@@ -85,25 +99,115 @@ WebSocket Status:
 <div id="hostBoard"></div>
 
 <script>
-
 let pendingNumber = null;
 
+let reconnectAttempts = 0;
+const MAX_DELAY = 30000;
 const protocol =
     window.location.protocol === "https:" ? "wss:" : "ws:";
+let socket;
+function connect() {
+    socket = new WebSocket(
+        `${protocol}//${window.location.host}/ws`
+    );
 
-const socket = new WebSocket(
-    `${protocol}//${window.location.host}/ws`
-);
+    socket.onopen = () => {
+        reconnectAttempts = 0;
+        console.log("Host socket connected");
 
-socket.onmessage = function(event) {
+        const game_id = localStorage.getItem("game_id");
+        if (game_id) {
+            // Returning host — reattach to the existing game.
+            socket.send(JSON.stringify({
+                type: "host_reconnect",
+                game_id: game_id
+            }));
+        } else {
+            // First time this host has connected — spin up a new game.
+            // Server responds with "game_created", which stores game_id.
+            socket.send(JSON.stringify({ type: "create_game" }));
+        }
+
+        document.getElementById("status").textContent = "Connected";
+        startHeartbeat(socket);
+    };
+
+    socket.onclose = (event) => {
+        console.log("Socket closed", event.code, event.reason);
+        scheduleReconnect();
+        document.getElementById("status").textContent = "Disconnected";
+
+        stopHeartbeat();
+    };
+
+    socket.onerror = (err) => {
+        console.error("Socket error", err);
+        // no reconnect call here — onclose will fire next
+    };
+
+    // Attached here (inside connect()) so every reconnect's new socket
+    // instance gets a working message handler — previously this was set
+    // once, outside connect(), on only the very first socket.
+    socket.onmessage = handleHostSocketMessage;
+
+    return socket;
+}
+connect();
+
+function scheduleReconnect() {
+  const delay = Math.min(1000 * 2 ** reconnectAttempts, MAX_DELAY);
+  const jitter = delay * 0.3 * Math.random();
+  reconnectAttempts++;
+  setTimeout(connect, delay + jitter);
+}
+
+let missedPings = 0;
+const MAX_MISSED = 3;
+let heartbeatTimer;
+
+function startHeartbeat(socket) {
+  heartbeatTimer = setInterval(() => {
+    missedPings++;
+    if (missedPings > MAX_MISSED) {
+      console.warn("Too many missed pongs, forcing reconnect");
+      socket.close(); // triggers onclose -> reconnect
+      return;
+    }
+    socket.send(JSON.stringify({ type: "ping" }));
+  }, 10000); // every 10s
+}
+
+
+function stopHeartbeat() {
+  clearInterval(heartbeatTimer);
+}
+
+
+function handleHostSocketMessage(event) {
     const data = JSON.parse(event.data);
     console.log("Received message from socket: ", JSON.stringify(data, null, 2));
     if (data.type === "reconnected") {
         console.log("Reconnect successful");
     }
     else if (data.type === "reconnect_failed") {
-        localStorage.removeItem("player_id");
-        window.location.href = "/";
+        console.error("ERROR: unhandled message: 'reconnect_failed'");
+        // localStorage.removeItem("player_id");
+        // window.location.href = "/";
+    }
+    else if (data.type === "host_reconnect_failed") {
+        console.error("Host reconnect failed — game_id not found on server:", localStorage.getItem("game_id"));
+        // This host's game no longer exists server-side (e.g. server restarted
+        // and in-memory games dict was wiped). Surface it rather than looping silently.
+        document.getElementById("status").textContent = "Reconnect failed — game not found";
+    }
+    else if (data.type === "host_reconnected") {
+        console.log("Host reconnect successful");
+        showJoinLink(localStorage.getItem("game_id"));
+    }
+    else if (data.type === "game_created") {
+        console.log("New game created:", data.game_id);
+        localStorage.setItem("game_id", data.game_id);
+        showJoinLink(data.game_id);
     }
     else if (data.type === "history") {
         console.log("History:", data.called_numbers);
@@ -126,7 +230,7 @@ socket.onmessage = function(event) {
         document.getElementById("currentNumber").textContent = "---";
     }
     else if (data.type === "game_started") {
-        print("game_started")
+        console.log("game_started")
         // TODO: What needs to be done here?  Disable / enable some buttons (Preview, Broadcast)?
     }
     else if (data.type === "game_status") {
@@ -142,6 +246,16 @@ socket.onmessage = function(event) {
         // alert("BINGO!");
         handle_winners(data.winners);
     } 
+    else if (data.type === "pong") {
+        console.log("received pong")
+        missedPings = 0;
+    }
+    // catch-all
+    else {
+        console.error("ERROR: Unexpected request: "+data.type);
+        return;
+    }
+
 }
 
 
@@ -243,30 +357,54 @@ function handle_winners(winners) {
     alert(str);
 }
 
+function showJoinLink(game_id) {
+    if (!game_id) return;
+    const link = `${window.location.origin}/join?game=${game_id}`;
+    document.getElementById("joinLinkInput").value = link;
+    document.getElementById("joinLinkBox").style.display = "flex";
+
+    const qrContainer = document.getElementById("joinQrCode");
+    qrContainer.innerHTML = ""; // clear any previous code before regenerating
+    new QRCode(qrContainer, {
+        text: link,
+        width: 100,
+        height: 100
+    });
+}
+
+document.getElementById("copyJoinLinkButton").onclick = async function() {
+    const input = document.getElementById("joinLinkInput");
+    const statusEl = document.getElementById("copyJoinLinkStatus");
+    try {
+        await navigator.clipboard.writeText(input.value);
+        statusEl.textContent = "Copied!";
+    } catch (e) {
+        // clipboard API can fail (e.g. non-HTTPS context) — fall back to
+        // manual select so the user can still Ctrl/Cmd+C it themselves.
+        input.select();
+        statusEl.textContent = "Press Ctrl+C to copy";
+    }
+    setTimeout(() => { statusEl.textContent = ""; }, 2000);
+};
+
 
 document.getElementById("previewButton").onclick = function() {
-    const value =
+    pendingNumber =
         canonicalizeBingoCall(document.getElementById("numberInput").value);
 
-    pendingNumber = canonicalizeBingoCall(value);
-    
+    if (pendingNumber === null) {
+        document.getElementById("preview").textContent =
+            "Invalid number — check the console for details.";
+        document.getElementById("broadcastButton").disabled = true;
+        return;
+    }
+
     document.getElementById("preview").textContent =
         "Ready to broadcast: " + pendingNumber;
     document.getElementById("broadcastButton").disabled = false;
 };
 
-socket.onopen = function() {
-    console.log("Host connected");
-    document.getElementById("status").innerText = "Connected";
-    console.log("Requesting game status");
-    socket.send(JSON.stringify({
-        type: "request_game_status"
-    }));
-};
 
-socket.onclose = function(event) {
-    console.log("WebSocket closed", event);
-};
 
 document.getElementById("broadcastButton").onclick = function() {
     const message = {

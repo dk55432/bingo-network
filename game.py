@@ -10,13 +10,14 @@ class GameStatus(Enum):
     GAME_OVER = "game_over"
 
 
-class GameState:
+class Game:
     def __init__(self):
         self.status = GameStatus.SETUP
         self.called_numbers = []
         # self.called_set = set()
         self.current_number: str | None = None
         self.players: dict[str, Player] = {}
+        self.host_websocket = None  # set once a host creates/reconnects to this game
         
     def __str__(self):
         result = f"status: {self.status}\n"
