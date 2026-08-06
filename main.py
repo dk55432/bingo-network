@@ -198,6 +198,10 @@ async def websocket_endpoint(websocket: WebSocket):
         
             elif data["type"] == "reconnect":
                 player_id = data["player_id"]
+                if not player_id:
+                    await websocket.send_json({"type":"error", "message":"player_id required"})
+                    continue
+                logger.info("reconnect: fetched player_id "+player_id)
                 player = game.players.get(player_id)
                 if player is None:
                     await manager.send_to_player(
@@ -358,6 +362,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         "status": str(game.status)
                     })
                 )     
+
             elif data["type"] == "game_over":
                 game.set_game_status(GameStatus.GAME_OVER)
                 logger.info("game_over: broadcasting status=GAME_OVER change")
@@ -367,6 +372,14 @@ async def websocket_endpoint(websocket: WebSocket):
                         "status": str(game.status)
                     })
                 )
+
+            elif data["type"] == "ping":
+                logger.debug("ping: reply with pong")
+                await manager.send_to_player( websocket,
+                    json.dumps({
+                        "type": "pong",
+                    })
+                )     
 
     except WebSocketDisconnect:
         disconnect_player(websocket)

@@ -107,16 +107,15 @@ socket.onmessage = function(event) {
     }
     else if (data.type === "history") {
         console.log("History:", data.called_numbers);
-        const container = document.getElementById("hostBoard");
-        container.innerHTML="";
-        // drawHostBoard(data.called_numbers);
-        const el=document.getElementById("hostBoard");
-        el.innerHTML="";
-        // drawHostBoardDoubles(data.called_numbers);
+        let el = document.getElementById("hostBoard");
+        el.innerHTML = "";
         drawHostBoardDoubles("hostBoard");
 
-        const container2 = document.getElementById("history");
-        container2.innerText = data.called_numbers;
+        // Re-mark every previously called number, not just the latest
+        data.called_numbers.forEach(markCalledNumberHost);
+
+        el = document.getElementById("history");
+        el.innerText = data.called_numbers;
     }
     else if (data.type === "number_called") {
         document.getElementById("currentNumber").textContent =
@@ -145,44 +144,9 @@ socket.onmessage = function(event) {
     } 
 }
 
-function drawHostBoard_OLD(called_numbers) {
-  const container = document.getElementById("hostBoard");
-  if (called_numbers == null || called_numbers.length == 0) {
-    container.innerHTML = ""
-    return
-  }
-  let html = "";
-  html += "<table>";
-
-  html += "<tr>";
-  html += "<th>B</th><th>I</th><th>N</th><th>G</th><th>O</th>";
-  html += "</tr>";
-
-  for (let row = 1; row <= 15; row++) {
-    html += "<tr>";
-    html += `<td id="cell-B${row}" >${row}</td>`;
-    html += `<td id="cell-I${row + 15}">${row + 15}</td>`;
-    html += `<td id="cell-N${row + 30}">${row + 30}</td>`;
-    html += `<td id="cell-G${row + 45}">${row + 45}</td>`;
-    html += `<td id="cell-O${row + 60}">${row + 60}</td>`;
-    html += "</tr>";
-  }
-
-  html += "</table>";
-  container.innerHTML = html;
-
-  // Mark called cells
-  for (const call of called_numbers) {
-    // call like "B3" or "O71"
-    const letter = call[0];              // "B" or "O"
-    const num = call.slice(1);          // "3" or "71"
-    const cell = document.getElementById(`cell-${letter}${num}`);
-    if (cell) cell.classList.add("marked");
-  }
-}
 
 function drawHostBoardDoubles(containerId = "hostBoard") {
-  console.log("readyState:", document.readyState);
+  console.log("drawHostBoardDoubles: readyState=", document.readyState);
   const container = document.getElementById(containerId);
   console.log("found container?", !!container);
   if (!container) {
@@ -232,6 +196,42 @@ function markCalledNumberHost(calledNumber) {
       .forEach(el => el.classList.add("marked"));
 }
 
+const RANGES = { B: [1,15], I: [16,30], N: [31,45], G: [46,60], O: [61,75] };
+
+function canonicalizeBingoCall(input) {
+  // Accept either a single combined string ("g52", "N31") or separate letter/number
+  let letter = "";
+  let numberStr = "";
+
+  const match = String(input).trim().match(/^([A-Za-z]?)(\d+)$/);
+  if (!match) {
+    console.error(`Invalid bingo call format: ${input}`);
+    return null;
+  }
+
+  letter = match[1].toUpperCase();
+  numberStr = match[2];
+  const n = Number(numberStr);
+
+  if (!letter) {
+    // No letter given — derive it from the number
+    letter = Object.keys(RANGES).find(l => n >= RANGES[l][0] && n <= RANGES[l][1]);
+    if (!letter) {
+      console.error(`Invalid bingo call: number ${n} is out of range 1-75`);
+      return null;
+    }
+    return `${letter}${n}`;
+  }
+
+  // Letter given — validate it matches the number's range
+  const range = RANGES[letter];
+  if (!range || n < range[0] || n > range[1]) {
+    console.error(`Invalid bingo call: ${letter}${n} is out of range`);
+    return null;
+  }
+
+  return `${letter}${n}`;
+}
 
 
 function handle_winners(winners) {
@@ -246,18 +246,10 @@ function handle_winners(winners) {
 
 document.getElementById("previewButton").onclick = function() {
     const value =
-        document.getElementById("numberInput").value;
-    /*
-       For now we duplicate the simple
-       canonicalization rule in JavaScript.
-       Later we will move this entirely
-       to the server.
-    */
-    if (value === "52") {
-        pendingNumber = "G52";
-    } else {
-        pendingNumber = value.toUpperCase();
-    }
+        canonicalizeBingoCall(document.getElementById("numberInput").value);
+
+    pendingNumber = canonicalizeBingoCall(value);
+    
     document.getElementById("preview").textContent =
         "Ready to broadcast: " + pendingNumber;
     document.getElementById("broadcastButton").disabled = false;

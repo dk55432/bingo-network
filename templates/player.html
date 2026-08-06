@@ -81,33 +81,122 @@ Game Status: <div id="gameStatus">Connecting...</div>
 
 
 <script>
-
+let reconnectAttempts = 0;
+const MAX_DELAY = 30000;
 const protocol =
     window.location.protocol === "https:" ? "wss:" : "ws:";
-
-const socket = new WebSocket(
+let socket = new WebSocket(
     `${protocol}//${window.location.host}/ws`
 );
+function connect() {
+    // const 
+      socket = new WebSocket(
+        `${protocol}//${window.location.host}/ws`
+    );
 
-socket.onopen = function() {
-    console.log("Player socket connected");
-    const player_id = localStorage.getItem("player_id");
-    socket.send(JSON.stringify({
-        type: "reconnect",
-        player_id: player_id
-    }));
-    document.getElementById("status").textContent = "Connected";
-    console.log("Requesting game status");
-    socket.send(JSON.stringify({
-        type: "request_game_status"
-    }));
-};
+    socket.onopen = () => {
+        reconnectAttempts = 0;
+        console.log("Connected");
+        // requestCatchUp(socket); // see #3 below
 
-socket.onclose = function() {
-    console.log("Join WebSocket closed");
-    document.getElementById("status").textContent = "Disconnected";
-    console.log("onclose: Do I need to wipe out the cache and redirect?");
-};
+        console.log("Player socket connected");
+        const player_id = localStorage.getItem("player_id");
+        socket.send(JSON.stringify({
+            type: "reconnect",
+            player_id: player_id
+        }));
+        document.getElementById("status").textContent = "Connected";
+        console.log("Requesting game status");
+        socket.send(JSON.stringify({
+            type: "request_game_status"
+        }));
+
+        startHeartbeat(socket);
+    };
+
+    socket.onclose = (event) => {
+        console.log("Socket closed", event.code, event.reason);
+        scheduleReconnect();
+        document.getElementById("status").textContent = "Disconnected";
+
+        stopHeartbeat();
+    };
+
+    socket.onerror = (err) => {
+        console.error("Socket error", err);
+        // no reconnect call here — onclose will fire next
+    };
+
+    return socket;
+}
+connect();
+
+function scheduleReconnect() {
+  const delay = Math.min(1000 * 2 ** reconnectAttempts, MAX_DELAY);
+  const jitter = delay * 0.3 * Math.random();
+  reconnectAttempts++;
+  setTimeout(connect, delay + jitter);
+}
+
+let missedPings = 0;
+const MAX_MISSED = 3;
+let heartbeatTimer;
+
+function startHeartbeat(socket) {
+  heartbeatTimer = setInterval(() => {
+    missedPings++;
+    if (missedPings > MAX_MISSED) {
+      console.warn("Too many missed pongs, forcing reconnect");
+      socket.close(); // triggers onclose -> reconnect
+      return;
+    }
+    socket.send(JSON.stringify({ type: "ping" }));
+  }, 10000); // every 10s
+}
+
+
+function stopHeartbeat() {
+  clearInterval(heartbeatTimer);
+}
+
+
+// function requestCatchUp(socket) {
+//   socket.send(JSON.stringify({
+//     type: "reconnect"
+//   }));
+//   // Server responds by sending "reconnected", "history", "cards" msgs.
+//   // We must also explicitly send "request_game_status".
+//   socket.send(JSON.stringify({
+//     type: "request_game_status"
+//   }));
+// }
+
+
+function handleFullState(msg) {
+  // clear and rebuild marks from scratch — simplest, least error-prone
+  document.querySelectorAll(".marked").forEach(el => el.classList.remove("marked"));
+  msg.called_numbers.forEach(markCalledNumberHost);
+}
+
+// socket.onopen = function() {
+//     console.log("Player socket connected");
+//     const player_id = localStorage.getItem("player_id");
+//     socket.send(JSON.stringify({
+//         type: "reconnect",
+//         player_id: player_id
+//     }));
+//     document.getElementById("status").textContent = "Connected";
+//     console.log("Requesting game status");
+//     socket.send(JSON.stringify({
+//         type: "request_game_status"
+//     }));
+// };
+
+// socket.onclose = function() {
+//     console.log("Join WebSocket closed");
+//     document.getElementById("status").textContent = "Disconnected";
+//     console.log("onclose: Do I need to wipe out the cache and redirect?");
+// };
 
 socket.onmessage = function(event) {
     const data = JSON.parse(event.data);
@@ -163,7 +252,27 @@ socket.onmessage = function(event) {
     else if (data.type === "action_rejected") {
         alert(data.action + ": " + data.reason)
     }
+    else if (data.type === "pong") {
+        console.log("received pong")
+        missedPings = 0;
+    }
+
 };
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    // tab woke up — socket may be stale even if it looks "open"
+    if (socket.readyState !== WebSocket.OPEN) {
+      connect();
+    } else {
+      requestCatchUp(socket); // cheap insurance
+    }
+  }
+});
+
+window.addEventListener("online", () => {
+  if (socket.readyState !== WebSocket.OPEN) connect();
+});
 
 
 document.getElementById("leaveGameButton").onclick = function() {
