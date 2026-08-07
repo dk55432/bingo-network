@@ -1,6 +1,8 @@
 from player import Player
 from enum import Enum
 import logging
+import uuid
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -9,18 +11,84 @@ class GameStatus(Enum):
     IN_PROGRESS = "in_progress"
     GAME_OVER = "game_over"
 
+class GameStatusString(Enum):
+    SETUP = "🟢 Waiting for players"
+    IN_PROGRESS = "🔴 Game in progress"
+    GAME_OVER = "🏁 Game finished"
 
+class GameManager:
+    # How long a game with no host and no connected players sits around
+    # before it's considered abandoned rather than mid-reconnect.
+    DEFAULT_GRACE_PERIOD_MINUTES = 30
+
+    def __init__(self):
+        self.games: dict[str, Game] = {}
+     
+    def create_game(self):
+        game = Game()
+        game.game_id = str(uuid.uuid4())
+        self.games[game.game_id] = game
+        logger.info("create_game: game_id "+game.game_id)
+        return game
+
+    def get_game(self, game_id):
+        return self.games.get(game_id)
+
+    def delete_game(self, game_id):
+        self.games.pop(game_id, None)
+
+    def cleanup_empty_games(self, grace_period_minutes=DEFAULT_GRACE_PERIOD_MINUTES):
+        """Remove games that have no host attached, no currently-connected
+        players, and haven't seen any activity within the grace period.
+
+        Deliberately NOT based on len(game.players) == 0 — players stay in
+        that dict after disconnecting (only an explicit "leave" removes
+        them), so that would only ever catch games nobody ever joined.
+        Checking player.connected instead reflects who's actually here
+        right now, and the grace period protects against sweeping up a
+        game mid-transient-disconnect (e.g. a host's wifi blipping).
+        """
+        now = datetime.now()
+        grace = timedelta(minutes=grace_period_minutes)
+
+        empty_ids = [
+            game_id for game_id, game in self.games.items()
+            if game.host_websocket is None
+            and not any(p.connected for p in game.players.values())
+            and not game.waiting_room
+            and (now - game.last_activity) >= grace
+        ]
+        for game_id in empty_ids:
+            logger.info("cleanup_empty_games: removing inactive game "+game_id)
+            del self.games[game_id]
+        return empty_ids
+    
+    
 class Game:
     def __init__(self):
         self.status = GameStatus.SETUP
+        self.game_id = ""
         self.called_numbers = []
         # self.called_set = set()
         self.current_number: str | None = None
         self.players: dict[str, Player] = {}
         self.host_websocket = None  # set once a host creates/reconnects to this game
+        self.last_activity = datetime.now()
+        # People who tried to join while status != SETUP. Keyed by a
+        # throwaway id (not a player_id — they aren't real players yet).
+        # Promoted into real players once setup_new_game() runs.
+        self.waiting_room: dict[str, dict] = {}
+
+    def touch(self):
+        """Call whenever someone connects or disconnects (join, reconnect,
+        host_reconnect, or either side leaving), so cleanup_empty_games
+        can tell a truly-abandoned game apart from one that's just
+        between connections."""
+        self.last_activity = datetime.now()
         
     def __str__(self):
-        result = f"status: {self.status}\n"
+        result = f"game_id: {self.game_id}\n"
+        result += f"status: {self.status}\n"
         result += f"Players: {len(self.players)}\n"
         for player in self.players.values():
             result += str(player) + "\n"
@@ -82,6 +150,13 @@ class Game:
     # Returns a dict of 2 arrays: 
     #   - winners: array of dicts { player_id, display_name, card_id }
     #   - updated_cards: array of dicts { player_id, card }
+    #
+    # TODO: split it into call_number() calling:
+    # _record_number()
+    # _mark_cards()
+    # _find_new_winners()
+    #
+    # Also, create a python GameEvent class; Game.call_numbers() returns a GameEvent
     def call_number(self, number):
         if self.has_called(number):
             logger.info("game.call_number: number "+str(number)+" is already called, returning.")

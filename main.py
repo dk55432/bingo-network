@@ -4,15 +4,14 @@ import json
 import uuid
 from datetime import datetime
 from connection_manager import ConnectionManager
-from game import Game, GameStatus, canonicalize_number
+from game import Game, GameManager, GameStatus, canonicalize_number
 from player import Player
 from bingo_card_factory import create_test_card
 import logging
 
 app = FastAPI()
 manager = ConnectionManager()
-# games = Game()
-games: dict[str, Game] = {}
+game_manager = GameManager()
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 templates = Jinja2Templates(directory="templates")
@@ -40,6 +39,12 @@ async def player_page(request: Request):
         name="player.html"
     )
 
+@app.get("/create_game")
+async def create_game_page(request: Request):
+    return templates.TemplateResponse(
+        request=request,
+        name="create_game.html"
+    )   
 
 @app.get("/host")
 async def host(request: Request):
@@ -53,7 +58,7 @@ async def host(request: Request):
 # @app.post("/create_game")  # or wherever "host starts a game" currently happens
 # async def create_game():
 #     game_id = str(uuid.uuid4())
-#     games[game_id] = Game()  # your existing Game() constructor, unchanged
+#     game_manager.games[game_id] = Game()  # your existing Game() constructor, unchanged
 #     return {"game_id": game_id}
     
     
@@ -61,11 +66,24 @@ def disconnect_player(websocket, game):
     if websocket in manager.active_connections:
         manager.disconnect(websocket)
 
+    game.touch()
+
+    if game.host_websocket == websocket:
+        game.host_websocket = None
+        logger.debug("host disconnected from game "+game.game_id)
+        return
+
     for player in game.players.values():
         if player.websocket == websocket:
             player.connected = False
             player.websocket = None
             logger.debug(f"{player.display_name} disconnected")
+            break
+
+    for pending_id, entry in list(game.waiting_room.items()):
+        if entry["websocket"] == websocket:
+            del game.waiting_room[pending_id]
+            logger.debug(f"waiting-room entry '{entry['display_name']}' disconnected")
             break
         
         
@@ -77,7 +95,7 @@ async def websocket_endpoint(websocket: WebSocket):
     # Set once this connection is associated with a game, via "join",
     # "reconnect", "host_reconnect", or "create_game". Everything else
     # on this connection (submit_number, leave, disconnect cleanup, etc.)
-    # looks the game up via games.get(current_game_id).
+    # looks the game up via game_manager.get_game(current_game_id).
     current_game_id = None
 
     try:
@@ -93,9 +111,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 logger.info(f"Invalid JSON received: {message!r}")
                 continue
             
+            # This is only for Players.
             if data["type"] == "join":
                 game_id = data.get("game_id")
-                game = games.get(game_id)
+                game = game_manager.get_game(game_id)
                 if game is None:
                     await manager.send_to_player(
                         websocket,
@@ -107,19 +126,25 @@ async def websocket_endpoint(websocket: WebSocket):
                     )
                     continue
 
+                current_game_id = game_id
+                game.touch()
+
                 if game.status != GameStatus.SETUP:
-                    logger.info("join: can only join during SETUP")
+                    logger.info("join: game in progress, adding to waiting room")
+                    pending_id = str(uuid.uuid4())
+                    game.waiting_room[pending_id] = {
+                        "display_name": data["display_name"],
+                        "websocket": websocket
+                    }
                     await manager.send_to_player(
                         websocket,
                         json.dumps({
-                            "type": "action_rejected",
-                            "action": "join",
-                            "reason": "game_in_progress"
+                            "type": "waiting_for_next_game",
+                            "status": game.status.name
                         })
                     )
                     continue
 
-                current_game_id = game_id
                 player = Player(
                     player_id = str(uuid.uuid4()),
                     display_name = data["display_name"],
@@ -159,9 +184,30 @@ async def websocket_endpoint(websocket: WebSocket):
                         player.connected,
                         player.websocket is not None
                     )
+                    
+            # A message from Host
+            elif data["type"] == "create_game":
+                removed = game_manager.cleanup_empty_games()
+                if removed:
+                    logger.info(f"create_game: cleaned up {len(removed)} abandoned game(s)")
+                game = game_manager.create_game()
+                if game is None:
+                    logger.error("create_game: create_game() returned None")
+                    continue
+                logger.info("Created game_id "+game.game_id)
+                game.host_websocket = websocket
+                current_game_id = game.game_id
+                await manager.send_to_player(
+                    websocket,
+                    json.dumps({
+                        "type": "game_created",
+                        "game_id": game.game_id
+                    })
+                )
                 
+                    
             elif data["type"] == "submit_number":
-                game = games.get(current_game_id)
+                game = game_manager.get_game(current_game_id)
                 if game is None:
                     await manager.send_to_player(
                         websocket,
@@ -241,9 +287,9 @@ async def websocket_endpoint(websocket: WebSocket):
                     logger.info("WINNER EVENT SENT")        
         
             elif data["type"] == "reconnect":
-                # existing player reconnect logic, but scoped to games[game_id]
+                # existing player reconnect logic, but scoped to game_manager.get_game(game_id)
                 game_id = data.get("game_id")
-                game = games.get(game_id)
+                game = game_manager.get_game(game_id)
                 if game is None:
                     await manager.send_to_player(
                         websocket,
@@ -257,6 +303,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     continue
 
                 current_game_id = game_id
+                game.touch()
                 logger.info("reconnect: fetched player_id "+player_id)
                 player = game.players.get(player_id)
                 if player is None:
@@ -308,7 +355,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     )
 
             elif data["type"] == "leave":
-                game = games.get(current_game_id)
+                game = game_manager.get_game(current_game_id)
                 if game is None:
                     await manager.send_to_player(
                         websocket,
@@ -325,7 +372,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     )
                 else:
                     game.remove_player(player.player_id)
-                    disconnect_player(websocket)
+                    disconnect_player(websocket, game)
                 await manager.send_to_player( websocket,
                     json.dumps({"type": "left",
                                 "message": "Bye"})
@@ -333,7 +380,7 @@ async def websocket_endpoint(websocket: WebSocket):
             
             # TODO: This goes away when we implement OCR scanning / card inputs.
             elif data["type"] == "load_test_cards":
-                game = games.get(current_game_id)
+                game = game_manager.get_game(current_game_id)
                 if game is None:
                     await manager.send_to_player(
                         websocket,
@@ -375,7 +422,7 @@ async def websocket_endpoint(websocket: WebSocket):
                            
             elif data["type"] == "dispose_cards":
                 logger.info("Entering disposeCards block")
-                game = games.get(current_game_id)
+                game = game_manager.get_game(current_game_id)
                 if game is None:
                     await manager.send_to_player(
                         websocket,
@@ -406,7 +453,7 @@ async def websocket_endpoint(websocket: WebSocket):
                   
             elif data["type"] == "setup_new_game":
                 logger.info("setup_new_game block")
-                game = games.get(current_game_id)
+                game = game_manager.get_game(current_game_id)
                 if game is None:
                     await manager.send_to_player(
                         websocket,
@@ -427,17 +474,56 @@ async def websocket_endpoint(websocket: WebSocket):
                 await manager.broadcast_to_game(
                     json.dumps({
                         "type": "game_status",
-                        "status": str(game.status)
+                        "status": game.status.name
                     }),
                     game
                 )
                 await broadcast_history(game)
                 for player in game.players.values():
                     await send_cards_to_player(player)
+
+                # Promote anyone who tried to join mid-game into real
+                # players now that we're back in SETUP.
+                for pending_id, entry in list(game.waiting_room.items()):
+                    ws = entry["websocket"]
+                    del game.waiting_room[pending_id]
+                    if ws not in manager.active_connections:
+                        # They disconnected while waiting — nothing to do.
+                        continue
+                    new_player = Player(
+                        player_id=str(uuid.uuid4()),
+                        display_name=entry["display_name"],
+                        websocket=ws,
+                        connected_at=datetime.now()
+                    )
+                    new_player.add_card(create_test_card(new_player, 1))
+                    game.add_player(new_player)
+                    logger.info("setup_new_game: promoted waiting-room entry "+new_player.display_name)
+                    await manager.send_to_player(
+                        ws,
+                        json.dumps({
+                            "type": "joined",
+                            "player_id": new_player.player_id
+                        })
+                    )
+                    await manager.send_to_player(
+                        ws,
+                        json.dumps({
+                            "type": "cards",
+                            "cards": cards_to_dict(new_player.cards)
+                        })
+                    )
+                    await manager.send_to_player(
+                        ws,
+                        json.dumps({
+                            "type": "history",
+                            "called_numbers": game.called_numbers
+                        })
+                    )
                 
             elif data["type"] == "start_game":
                 logger.info("start_game: switch status to IN_PROGRESS")
-                game = games.get(current_game_id)
+                game = game_manager.get_game(current_game_id)
                 if game is None:
                     await manager.send_to_player(
                         websocket,
@@ -452,17 +538,18 @@ async def websocket_endpoint(websocket: WebSocket):
                 await manager.broadcast_to_game(
                     json.dumps({
                         "type": "game_status",
-                        "status": str(game.status)
+                        "status": game.status.name
                     }),
                     game
                 )
+                await notify_waiting_room(game)
             elif data["type"] == "request_game_status":
                 # join.html sends game_id explicitly since that connection
                 # hasn't joined a game yet, so current_game_id isn't set.
                 # Already-joined/reconnected clients omit it and fall back
                 # to the game this connection is already attached to.
                 lookup_id = data.get("game_id") or current_game_id
-                game = games.get(lookup_id)
+                game = game_manager.get_game(lookup_id)
                 if game is None:
                     await manager.send_to_player(
                         websocket,
@@ -473,16 +560,16 @@ async def websocket_endpoint(websocket: WebSocket):
                         })
                     )
                     continue
-                logger.debug("request_game_status: sending status "+str(game.status)+" to client")
+                logger.debug("request_game_status: sending status "+game.status.name+" to client")
                 await manager.send_to_player( websocket,
                     json.dumps({
                         "type": "game_status",
-                        "status": str(game.status)
+                        "status": game.status.name
                     })
                 )     
 
             elif data["type"] == "game_over":
-                game = games.get(current_game_id)
+                game = game_manager.get_game(current_game_id)
                 if game is None:
                     await manager.send_to_player(
                         websocket,
@@ -498,10 +585,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 await manager.broadcast_to_game(
                     json.dumps({
                         "type": "game_status",
-                        "status": str(game.status)
+                        "status": game.status.name
                     }),
                     game
                 )
+                await notify_waiting_room(game)
 
             elif data["type"] == "ping":
                 logger.debug("ping: reply with pong")
@@ -513,24 +601,22 @@ async def websocket_endpoint(websocket: WebSocket):
                 
             elif data["type"] == "host_reconnect":
                 game_id = data.get("game_id")
-                game = games.get(game_id)
+                game = game_manager.get_game(game_id)
                 if not game:
                     await websocket.send_json({"type": "host_reconnect_failed"})
                     continue
                 game.host_websocket = websocket
                 current_game_id = game_id
+                game.touch()
                 await websocket.send_json({"type": "host_reconnected"})
+                await websocket.send_json({
+                    "type": "game_status",
+                    "status": game.status.name
+                })
                 await websocket.send_json({
                     "type": "history",
                     "called_numbers": game.called_numbers
                 })    
-                            
-            elif data["type"] == "create_game":
-                game_id = str(uuid.uuid4())
-                games[game_id] = Game()
-                games[game_id].host_websocket = websocket
-                current_game_id = game_id
-                await websocket.send_json({"type": "game_created", "game_id": game_id})
 
             # Catch-all
             else:
@@ -538,7 +624,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 continue
 
     except WebSocketDisconnect:
-        game = games.get(current_game_id)
+        game = game_manager.get_game(current_game_id)
         if game is not None:
             # existing disconnect cleanup, scoped to the right game
             disconnect_player(websocket, game)
@@ -558,6 +644,19 @@ async def websocket_endpoint(websocket: WebSocket):
             if websocket in manager.active_connections:
                 manager.disconnect(websocket)
             logger.info(f"Clients connected: {len(manager.active_connections)}")
+
+async def notify_waiting_room(game):
+    """Let people queued in the waiting room see status changes (e.g. the
+    game moving to GAME_OVER) — a small courtesy so the wait doesn't feel
+    like a black box, even though they aren't promoted until SETUP."""
+    for entry in game.waiting_room.values():
+        await manager.send_to_player(
+            entry["websocket"],
+            json.dumps({
+                "type": "game_status",
+                "status": game.status.name
+            })
+        )
 
 async def broadcast_history(game):
     logger.info("broadcast_history: entering with game="+ str(game))

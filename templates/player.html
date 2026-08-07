@@ -81,6 +81,32 @@ Game Status: <div id="gameStatus">Connecting...</div>
 
 
 <script>
+const GameStatus = Object.freeze({
+    SETUP: "SETUP",
+    IN_PROGRESS: "IN_PROGRESS",
+    GAME_OVER: "GAME_OVER"
+});
+const GameStatusDisplay = Object.freeze({
+    SETUP: "🟢 Waiting for players",
+    IN_PROGRESS: "🔴 Game in progress",
+    GAME_OVER: "🏁 Game over"
+});
+function gameStatusToText(status) {
+    switch (status) {
+        case GameStatus.SETUP:
+            return "🟢 Waiting for players";
+
+        case GameStatus.IN_PROGRESS:
+            return "🔴 Game in progress";
+
+        case GameStatus.GAME_OVER:
+            return "🏁 Game over";
+
+        default:
+            return status;
+    }
+}
+
 let reconnectAttempts = 0;
 const MAX_DELAY = 30000;
 const protocol =
@@ -207,8 +233,8 @@ function handleSocketMessage(event) {
     }
     else if (data.type === "game_status") {
         document.getElementById("gameStatus").innerText =
-            "Game Status: "+data.status;
-            //TODO: disable / enable anything?
+            gameStatusToText(data.status);
+        handle_game_status(data.status);
     }
     else if (data.type === "action_rejected") {
         alert(data.action + ": " + data.reason)
@@ -389,6 +415,20 @@ function handle_winners(winners) {
         }
         alert(str);
     }
+}
+
+function handle_game_status(status) {
+    // Test-card loading and disposal only make sense during SETUP —
+    // the server already rejects load_test_cards outside SETUP, this just
+    // keeps the buttons from inviting an action that'll be rejected.
+    const setupOnlyButtons = [
+        document.getElementById("testCard1"),
+        document.getElementById("testCard2"),
+        document.getElementById("testCard3"),
+        document.getElementById("disposeCards")
+    ];
+    const isSetup = status === GameStatus.SETUP;
+    setupOnlyButtons.forEach(btn => btn.disabled = !isSetup);
 }
 </script>
 

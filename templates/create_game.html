@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>
+        Create a bingo game
+    </title>
+    <link rel="icon" href="data:,">
+</head>
+<body>
+    <h1>Bingo Host</h1>
+
+    <p id="existingGameNote" style="display:none;">
+        You have an existing game on this device.
+    </p>
+
+    <button id="createGameButton">
+        Start a New Game
+    </button>
+    <button id="useExistingGameButton" style="display:none;">
+        Continue Existing Game
+    </button>
+
+    <script>
+        // This page makes no websocket connection of its own — it's just a
+        // decision point. host.html already knows how to create a new game
+        // (when localStorage has no game_id) or reconnect to an existing
+        // one (when it does), so all this page needs to do is set that
+        // localStorage state correctly and then hand off to /host.
+
+        const existingGameId = localStorage.getItem("game_id");
+        if (existingGameId) {
+            document.getElementById("existingGameNote").style.display = "block";
+            document.getElementById("useExistingGameButton").style.display = "inline";
+        }
+
+        document.getElementById("createGameButton").onclick = function() {
+            // Forces host.html to send "create_game" instead of "host_reconnect"
+            // on connect, even if a stale game_id was left over from before.
+            localStorage.removeItem("game_id");
+            window.location.href = "/host";
+        };
+
+        document.getElementById("useExistingGameButton").onclick = function() {
+            // host.html will attempt "host_reconnect" using the stored
+            // game_id. If that game no longer exists server-side (e.g. the
+            // server restarted since it was created), host.html surfaces
+            // that failure directly rather than silently doing nothing.
+            window.location.href = "/host";
+        };
+    </script>
+</body>
+</html>

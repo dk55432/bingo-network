@@ -99,6 +99,33 @@ WebSocket Status:
 <div id="hostBoard"></div>
 
 <script>
+
+const GameStatus = Object.freeze({
+    SETUP: "SETUP",
+    IN_PROGRESS: "IN_PROGRESS",
+    GAME_OVER: "GAME_OVER"
+});
+const GameStatusDisplay = Object.freeze({
+    SETUP: "🟢 Waiting for players",
+    IN_PROGRESS: "🔴 Game in progress",
+    GAME_OVER: "🏁 Game over"
+});
+function gameStatusToText(status) {
+    switch (status) {
+        case GameStatus.SETUP:
+            return "🟢 Waiting for players";
+
+        case GameStatus.IN_PROGRESS:
+            return "🔴 Game in progress";
+
+        case GameStatus.GAME_OVER:
+            return "🏁 Game over";
+
+        default:
+            return status;
+    }
+}
+
 let pendingNumber = null;
 
 let reconnectAttempts = 0;
@@ -196,9 +223,13 @@ function handleHostSocketMessage(event) {
     }
     else if (data.type === "host_reconnect_failed") {
         console.error("Host reconnect failed — game_id not found on server:", localStorage.getItem("game_id"));
-        // This host's game no longer exists server-side (e.g. server restarted
-        // and in-memory games dict was wiped). Surface it rather than looping silently.
-        document.getElementById("status").textContent = "Reconnect failed — game not found";
+        // Most likely cause: the server restarted since this game_id was
+        // created (in-memory games are wiped on restart), so it's stale.
+        // Clear it and send the host back to the decision page rather than
+        // leaving them stuck on a host page with no working game.
+        localStorage.removeItem("game_id");
+        alert("This game session is no longer available on the server (it may have restarted). Please start a new game.");
+        window.location.href = "/create_game";
     }
     else if (data.type === "host_reconnected") {
         console.log("Host reconnect successful");
@@ -236,7 +267,8 @@ function handleHostSocketMessage(event) {
     else if (data.type === "game_status") {
         console.log("game_status: game status is now " + data.status)
         // TODO:  Print the status on the screen.  Conditionally disable/enable buttons??
-        document.getElementById("gameStatus").textContent = "Game Status: "+data.status;
+        document.getElementById("gameStatus").innerText =
+                                gameStatusToText(data.status);
     }
     else if (data.type === "action_rejected") {
         alert(data.action + ": " + data.reason)

@@ -33,6 +33,11 @@ WebSocket Status:
             const urlParams = new URLSearchParams(window.location.search);
             const gameId = urlParams.get("game") || localStorage.getItem("game_id");
 
+            // If a page reload happens while we're in the waiting room,
+            // this remembers that we were waiting (and who as) so we can
+            // silently rejoin the queue instead of losing our spot.
+            let isWaiting = localStorage.getItem("waiting_for_game_id") === gameId;
+
             if (gameId) {
                 localStorage.setItem("game_id", gameId);
             } else {
@@ -41,62 +46,135 @@ WebSocket Status:
                 document.getElementById("joinButton").disabled = true;
             }
 
-            const socket = new WebSocket(
-                `${protocol}//${window.location.host}/ws`
-            );
+            let reconnectAttempts = 0;
+            const MAX_DELAY = 30000;
+            let socket;
 
-            document.getElementById("joinButton").onclick = function() {
-                if (!gameId) return; // button is disabled in this case, but just in case
-                console.log("Join button clicked");
+            function connect() {
+                socket = new WebSocket(
+                    `${protocol}//${window.location.host}/ws`
+                );
+
+                socket.onopen = () => {
+                    reconnectAttempts = 0;
+                    console.log("WebSocket connected");
+                    document.getElementById("status").textContent = "Connected";
+
+                    if (!gameId) return;
+
+                    if (isWaiting) {
+                        // We were mid-wait (or just reloaded while waiting) —
+                        // silently rejoin the queue rather than making the
+                        // person click Join again.
+                        sendJoin();
+                    } else {
+                        console.log("Requesting game status");
+                        socket.send(JSON.stringify({
+                            type: "request_game_status",
+                            game_id: gameId
+                        }));
+                    }
+
+                    startHeartbeat(socket);
+                };
+
+                socket.onclose = (event) => {
+                    console.log("Socket closed", event.code, event.reason);
+                    document.getElementById("status").textContent = "Disconnected";
+                    scheduleReconnect();
+                    stopHeartbeat();
+                };
+
+                socket.onerror = (err) => {
+                    console.error("Socket error", err);
+                    // no reconnect call here — onclose will fire next
+                };
+
+                socket.onmessage = handleSocketMessage;
+
+                return socket;
+            }
+            connect();
+
+            function scheduleReconnect() {
+                const delay = Math.min(1000 * 2 ** reconnectAttempts, MAX_DELAY);
+                const jitter = delay * 0.3 * Math.random();
+                reconnectAttempts++;
+                setTimeout(connect, delay + jitter);
+            }
+
+            let missedPings = 0;
+            const MAX_MISSED = 3;
+            let heartbeatTimer;
+
+            function startHeartbeat(socket) {
+                heartbeatTimer = setInterval(() => {
+                    missedPings++;
+                    if (missedPings > MAX_MISSED) {
+                        console.warn("Too many missed pongs, forcing reconnect");
+                        socket.close(); // triggers onclose -> reconnect
+                        return;
+                    }
+                    socket.send(JSON.stringify({ type: "ping" }));
+                }, 10000); // every 10s
+            }
+
+            function stopHeartbeat() {
+                clearInterval(heartbeatTimer);
+            }
+
+            function sendJoin() {
                 const message = {
                     type: "join",
-                    display_name:
-                        document.getElementById("displayName").value,
+                    display_name: document.getElementById("displayName").value,
                     game_id: gameId
                 };
                 console.log(message);
                 socket.send(JSON.stringify(message));
-            };            
-
-            socket.onopen = function() {
-                console.log("WebSocket connected");
-                if (!gameId) return;
-                console.log("Requesting game status");
-                socket.send(JSON.stringify({
-                    type: "request_game_status",
-                    game_id: gameId
-                }));
             }
 
-            socket.onclose = function() {
-                document.getElementById("errorMessage").innerText =
-                    "Server connection lost. Please reload.";
+            document.getElementById("joinButton").onclick = function() {
+                if (!gameId) return; // button is disabled in this case, but just in case
+                console.log("Join button clicked");
+                sendJoin();
+                document.getElementById("joinButton").disabled = true;
             };
 
-            socket.onmessage = function(event) {
-
+            function handleSocketMessage(event) {
                 const data = JSON.parse(event.data);
 
                 if (data.type === "joined") {
-
-                    localStorage.setItem(
-                        "player_id",
-                        data.player_id
-                    );
-
+                    localStorage.setItem("player_id", data.player_id);
+                    localStorage.removeItem("waiting_for_game_id");
                     window.location.href = "/player";
+                }
+                else if (data.type === "waiting_for_next_game") {
+                    isWaiting = true;
+                    localStorage.setItem("waiting_for_game_id", gameId);
+                    document.getElementById("joinButton").disabled = true;
+                    document.getElementById("displayName").disabled = true;
+                    document.getElementById("errorMessage").innerText =
+                        "The game is already in progress. You'll be added automatically when the next game starts — keep this page open.";
+                    document.getElementById("gameStatus").innerText =
+                        "Game Status: " + data.status;
                 }
                 else if (data.type === "action_rejected") {
                     document.getElementById("errorMessage").innerText =
                         "ERROR: " + data.reason;
+                    document.getElementById("joinButton").disabled = false;
                 }
                 else if (data.type === "game_status") {
                     document.getElementById("gameStatus").innerText =
                         "Game Status: "+data.status;
                         //TODO: disable / enable anything?
                 }
-
-            };            
+                else if (data.type === "pong") {
+                    missedPings = 0;
+                }
+                else {
+                    console.error("ERROR: Unexpected message: "+data.type);
+                }
+            }
         </script>
     </body>
 </html>
