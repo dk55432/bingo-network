@@ -1,0 +1,20 @@
+<!--
+  Add this to player.html. It assumes you already have the current
+  player's id available in a JS variable (however your app currently
+  tracks the logged-in/current player) — substitute that in below.
+-->
+
+<a href="scan.html?player_id=CURRENT_PLAYER_ID" class="scan-cards-btn">
+  Scan cards from phone
+</a>
+
+<!--
+  Or, if you build the URL in JS rather than templating it server-side:
+
+  <button id="scanCardsBtn">Scan cards from phone</button>
+  <script>
+    document.getElementById("scanCardsBtn").addEventListener("click", () => {
+      window.location.href = `scan.html?player_id=${encodeURIComponent(currentPlayerId)}`;
+    });
+  </script>
+-->

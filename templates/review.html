@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Scan a bingo card</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=IBM+Plex+Mono:wght@500;600&family=Inter:wght@400;500&display=swap');
+
+  :root {
+    --ink: #1c2340;
+    --paper: #f7f5ee;
+    --card: #ffffff;
+    --stamp-red: #b23a2f;
+    --stamp-blue: #2a4d7a;
+    --line: #d8d4c4;
+    --muted: #6b6f80;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: 'Inter', sans-serif;
+    display: flex;
+    justify-content: center;
+    padding: 32px 16px 80px;
+  }
+
+  main { width: 100%; max-width: 420px; }
+
+  h1 {
+    font-family: 'Space Grotesk', sans-serif;
+    font-weight: 700;
+    font-size: 26px;
+    letter-spacing: -0.01em;
+    margin: 0 0 4px;
+  }
+
+  .subtitle { color: var(--muted); font-size: 14px; margin: 0 0 28px; }
+
+  .upload-box {
+    border: 1.5px dashed var(--line);
+    border-radius: 12px;
+    padding: 28px 20px;
+    text-align: center;
+    background: var(--card);
+    cursor: pointer;
+  }
+
+  .upload-box:hover { border-color: var(--stamp-blue); }
+
+  .upload-box input { display: none; }
+
+  .upload-label { font-weight: 500; font-size: 15px; }
+  .upload-hint { color: var(--muted); font-size: 13px; margin-top: 4px; }
+
+  .status { font-size: 14px; color: var(--muted); margin: 16px 0; min-height: 20px; }
+
+  #card {
+    display: none;
+    background: var(--card);
+    border-radius: 14px;
+    padding: 18px;
+    box-shadow: 0 1px 2px rgba(28,35,64,0.06), 0 8px 24px rgba(28,35,64,0.06);
+  }
+
+  .headers, .row {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 6px;
+  }
+
+  .headers { margin-bottom: 6px; }
+
+  .headers span {
+    text-align: center;
+    font-family: 'Space Grotesk', sans-serif;
+    font-weight: 700;
+    font-size: 15px;
+    color: var(--stamp-blue);
+  }
+
+  .row { margin-bottom: 6px; }
+
+  .cell {
+    aspect-ratio: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 8px;
+    background: var(--paper);
+    border: 1.5px solid var(--line);
+  }
+
+  .cell input {
+    width: 100%;
+    height: 100%;
+    text-align: center;
+    border: none;
+    background: transparent;
+    font-family: 'IBM Plex Mono', monospace;
+    font-weight: 600;
+    font-size: 16px;
+    color: var(--ink);
+    border-radius: 8px;
+  }
+
+  .cell input:focus { outline: 2px solid var(--stamp-blue); outline-offset: -2px; }
+
+  .cell.flagged { border-color: var(--stamp-red); background: #fbeceb; }
+  .cell.free { background: var(--stamp-blue); }
+  .cell.free span { color: white; font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 12px; }
+
+  .legend {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12.5px; color: var(--muted); margin-top: 14px;
+  }
+  .legend .swatch { width: 12px; height: 12px; border-radius: 3px; border: 1.5px solid var(--stamp-red); background: #fbeceb; }
+
+  button.confirm {
+    width: 100%;
+    margin-top: 20px;
+    padding: 13px;
+    border: none;
+    border-radius: 10px;
+    background: var(--stamp-red);
+    color: white;
+    font-family: 'Space Grotesk', sans-serif;
+    font-weight: 700;
+    font-size: 15px;
+    cursor: pointer;
+  }
+
+  button.confirm:disabled { background: var(--line); color: var(--muted); cursor: not-allowed; }
+  button.confirm:not(:disabled):hover { background: #9a3128; }
+
+  .saved-note { font-size: 13px; color: var(--muted); text-align: center; margin-top: 12px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Scan a bingo card</h1>
+  <p class="subtitle">Take a photo, then fix any flagged numbers before saving.</p>
+
+  <label class="upload-box" id="uploadBox">
+    <input type="file" id="fileInput" accept="image/*" capture="environment">
+    <div class="upload-label">Tap to take or choose a photo</div>
+    <div class="upload-hint">Flat, well-lit, all four edges visible</div>
+  </label>
+
+  <div class="status" id="status"></div>
+
+  <div id="card">
+    <div class="headers">
+      <span>B</span><span>I</span><span>N</span><span>G</span><span>O</span>
+    </div>
+    <div id="grid"></div>
+    <div class="legend"><span class="swatch"></span> flagged — check this number</div>
+    <button class="confirm" id="confirmBtn" disabled>Save card</button>
+    <div class="saved-note" id="savedNote"></div>
+  </div>
+</main>
+
+<script>
+  // Point this at your FastAPI server.
+  const API_BASE = "http://localhost:8000";
+
+  const fileInput = document.getElementById("fileInput");
+  const statusEl = document.getElementById("status");
+  const cardEl = document.getElementById("card");
+  const gridEl = document.getElementById("grid");
+  const confirmBtn = document.getElementById("confirmBtn");
+  const savedNote = document.getElementById("savedNote");
+
+  fileInput.addEventListener("change", async () => {
+    const file = fileInput.files[0];
+    if (!file) return;
+
+    statusEl.textContent = "Scanning…";
+    cardEl.style.display = "none";
+    savedNote.textContent = "";
+
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+      const res = await fetch(`${API_BASE}/scan-card`, { method: "POST", body: formData });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || "Scan failed");
+      }
+      const data = await res.json();
+      renderGrid(data.grid);
+      statusEl.textContent = data.needs_review
+        ? "Some numbers need a check — flagged in red below."
+        : "Looks good — review, then save.";
+      cardEl.style.display = "block";
+      confirmBtn.disabled = false;
+    } catch (e) {
+      statusEl.textContent = `Error: ${e.message}`;
+    }
+  });
+
+  function renderGrid(grid) {
+    gridEl.innerHTML = "";
+    grid.forEach((row) => {
+      const rowEl = document.createElement("div");
+      rowEl.className = "row";
+      row.forEach((cellData) => {
+        const cellEl = document.createElement("div");
+        cellEl.className = "cell";
+
+        if (cellData.is_free_space) {
+          cellEl.classList.add("free");
+          cellEl.innerHTML = "<span>FREE</span>";
+        } else {
+          if (!cellData.valid) cellEl.classList.add("flagged");
+          const input = document.createElement("input");
+          input.type = "text";
+          input.inputMode = "numeric";
+          input.value = cellData.value ?? "";
+          input.addEventListener("input", () => cellEl.classList.remove("flagged"));
+          cellEl.appendChild(input);
+        }
+        rowEl.appendChild(cellEl);
+      });
+      gridEl.appendChild(rowEl);
+    });
+  }
+
+  confirmBtn.addEventListener("click", async () => {
+    const grid = [...gridEl.querySelectorAll(".row")].map((rowEl) =>
+      [...rowEl.querySelectorAll(".cell")].map((cellEl) => {
+        if (cellEl.classList.contains("free")) return null;
+        const val = cellEl.querySelector("input").value.trim();
+        return val === "" ? null : parseInt(val, 10);
+      })
+    );
+
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = "Saving…";
+
+    try {
+      const res = await fetch(`${API_BASE}/cards`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ grid }),
+      });
+      if (!res.ok) throw new Error("Save failed");
+      const saved = await res.json();
+      savedNote.textContent = `Saved as card #${saved.id}.`;
+    } catch (e) {
+      savedNote.textContent = `Error: ${e.message}`;
+    } finally {
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = "Save card";
+    }
+  });
+</script>
+</body>
+</html>
