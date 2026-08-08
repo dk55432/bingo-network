@@ -16,7 +16,9 @@ Run with: pytest test_winning_pattern_unit.py -v
 
 from types import SimpleNamespace
 
-from winning_pattern import MaskPattern, AnyPattern, AllPattern
+import pytest
+
+from winning_pattern import MaskPattern, AnyPattern, AllPattern, ConstraintPattern
 from pattern_helpers import blank_mask, row_mask, diagonal_mask, combine_masks
 
 
@@ -55,6 +57,64 @@ class TestMaskPattern:
         # an edge case worth pinning down explicitly.
         pattern = MaskPattern("empty", blank_mask())
         assert pattern.matches(self._card_with_marks(blank_mask()))
+
+
+# ---------------------------------------------------------------------------
+# ConstraintPattern
+#
+# Same SimpleNamespace-as-card approach as MaskPattern above — matches()
+# only reads card.marked, so no need for a real BingoCard here either.
+# ---------------------------------------------------------------------------
+
+class TestConstraintPattern:
+    def _card_with_marks(self, marked):
+        return SimpleNamespace(marked=marked)
+
+    def _marked_count(self, n):
+        # A row-0 mask with exactly n of its 5 cells marked — enough to
+        # exercise counting without needing a full row completed.
+        marked = blank_mask()
+        for col in range(n):
+            marked[0][col] = True
+        return marked
+
+    def test_at_least_matches_when_count_exceeds_threshold(self):
+        pattern = ConstraintPattern.at_least("row-0", row_mask(0), n=3)
+        assert pattern.matches(self._card_with_marks(self._marked_count(4)))
+
+    def test_at_least_matches_at_exact_threshold(self):
+        pattern = ConstraintPattern.at_least("row-0", row_mask(0), n=3)
+        assert pattern.matches(self._card_with_marks(self._marked_count(3)))
+
+    def test_at_least_does_not_match_below_threshold(self):
+        pattern = ConstraintPattern.at_least("row-0", row_mask(0), n=3)
+        assert not pattern.matches(self._card_with_marks(self._marked_count(2)))
+
+    def test_at_most_matches_at_exact_threshold(self):
+        pattern = ConstraintPattern.at_most("row-0", row_mask(0), n=3)
+        assert pattern.matches(self._card_with_marks(self._marked_count(3)))
+
+    def test_at_most_matches_below_threshold(self):
+        pattern = ConstraintPattern.at_most("row-0", row_mask(0), n=3)
+        assert pattern.matches(self._card_with_marks(self._marked_count(2)))
+
+    def test_at_most_does_not_match_above_threshold(self):
+        pattern = ConstraintPattern.at_most("row-0", row_mask(0), n=3)
+        assert not pattern.matches(self._card_with_marks(self._marked_count(4)))
+
+    def test_only_counts_cells_inside_the_mask(self):
+        # 3 cells marked, but only 1 of them is actually inside the mask
+        # (row 0) — should count as 1, not 3.
+        marked = blank_mask()
+        marked[0][0] = True   # inside the row-0 mask
+        marked[3][0] = True   # outside it
+        marked[4][4] = True   # outside it
+        pattern = ConstraintPattern.at_least("row-0", row_mask(0), n=2)
+        assert not pattern.matches(self._card_with_marks(marked))
+
+    def test_rejects_unknown_comparison(self):
+        with pytest.raises(ValueError):
+            ConstraintPattern("row-0", row_mask(0), "at_most_or_something", 3)
 
 
 # ---------------------------------------------------------------------------

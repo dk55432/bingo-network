@@ -1,0 +1,172 @@
+# Patterns config file
+
+# ------------------------------------------------------------
+# MASKS
+# Format:
+#     MASK maskname
+#     X----
+#     -X---
+#     --X--
+#     ---X-
+#     ----X
+#     
+# Masks must be exactly 5x5 (leading/trailing spaces are stripped away),
+#     the dash (-) character represents an unchecked cell,
+#     the X (case-insensitive) represents a checked cell.
+# ------------------------------------------------------------
+
+MASK row0
+XXXXX
+-----
+-----
+-----
+-----
+
+MASK row1
+-----
+XXXXX
+-----
+-----
+-----
+
+MASK row2
+-----
+-----
+XXXXX
+-----
+-----
+
+MASK row3
+-----
+-----
+-----
+XXXXX
+-----
+
+MASK row4
+-----
+-----
+-----
+-----
+XXXXX
+
+MASK col0
+X----
+X----
+X----
+X----
+X----
+
+MASK col1
+-X---
+-X---
+-X---
+-X---
+-X---
+
+MASK col2
+--X--
+--X--
+--X--
+--X--
+--X--
+
+MASK col3
+---X-
+---X-
+---X-
+---X-
+---X-
+
+MASK col4
+----X
+----X
+----X
+----X
+----X
+
+MASK diagonal-bottomleft-upperright
+----X
+---X-
+--X--
+-X---
+X----
+
+MASK diagonal-upperleft-bottomright
+X----
+-X---
+--X--
+---X-
+----X
+
+# ------------------------------------------------------------
+# PATTERNS
+# Format:
+#    PATTERN patternname
+#    maskname
+#
+# or
+#
+#    PATTERN patternname
+#    AtLeast(maskname, min_num_cells_marked)
+#
+# or
+#
+#    PATTERN patternname
+#    AtMost(maskname, max_num_cells_marked)
+#
+# or
+#
+#    PATTERN patternname
+#    AND
+#        mask1
+#        mask2
+#        ...etc...
+#
+# or
+#
+#    PATTERN patternname
+#    OR
+#        mask1
+#        mask2
+#
+# Note, you can use AND or OR to combine multiple masks, and AND or OR
+#       can be nested, like this:
+#
+#    PATTERN patternname
+#    OR
+#        AND
+#            col0
+#            col4
+#        AND
+#            row0
+#            row4
+#
+# This would translate into (col0 AND col4) OR (row0 AND row4).
+# ------------------------------------------------------------
+
+PATTERN top3-and-bottom3
+AND
+    AtLeast(row0, 3)
+    AtLeast(row4, 3)
+
+PATTERN standard-bingo
+OR
+    row0
+    row1
+    row2
+    row3
+    row4
+    col0
+    col1
+    col2
+    col3
+    col4
+    diagonal-bottomleft-upperright
+    diagonal-upperleft-bottomright
+
+PATTERN diagonals
+OR
+    diagonal-bottomleft-upperright
+    diagonal-upperleft-bottomright
+
