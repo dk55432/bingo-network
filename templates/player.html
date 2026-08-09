@@ -62,6 +62,7 @@
         <button id="testCard3">Load test card 3</button>
         <button id="disposeCards">Dispose of current cards</button>
         <button id="startFresh">Start fresh, forget previous session</button>
+        <button id="scanCardButton">Scan cards from phone</button>
 <p>
 WebSocket Status:
 <span id="status">Disconnected</span>
@@ -329,6 +330,12 @@ document.getElementById("testCard3").onclick = function() {
         player_id: player_id,
         number: "3"  
     }));
+}
+
+document.getElementById("scanCardButton").onclick = function() {
+    console.log("pressed scanCardButton")
+    const player_id = localStorage.getItem("player_id");
+    window.location.href = "/scan.html?player_id="+player_id;
 }
 
 function showCurrentNumber(number) {
