@@ -187,3 +187,15 @@ def parse_patterns(lines: List[str], i: int, masks) -> Tuple[Dict[str, WinningPa
             continue
         i += 1
     return patterns, i
+
+
+def load_patterns_from_file(path: str) -> Dict[str, WinningPattern]:
+    """Read and parse a patterns config file in one call, returning just
+    the finished {pattern_name: WinningPattern} dict — the masks dict is
+    an internal parsing detail callers loading a whole config file don't
+    need to see."""
+    with open(path) as f:
+        lines = f.read().splitlines()
+    masks, i = parse_masks(lines, 0)
+    patterns, _ = parse_patterns(lines, i, masks)
+    return patterns

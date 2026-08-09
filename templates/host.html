@@ -62,6 +62,11 @@ Called numbers: <div id="history"> --- </div>
 
 <div id="gameStatus">Game Status: SETUP</div>
 
+<div>
+    Winning pattern:
+    <select id="patternSelect" disabled></select>
+</div>
+
 <p>
 WebSocket Status:
 <span id="status">Disconnected</span>
@@ -234,11 +239,13 @@ function handleHostSocketMessage(event) {
     else if (data.type === "host_reconnected") {
         console.log("Host reconnect successful");
         showJoinLink(localStorage.getItem("game_id"));
+        populatePatternSelect(data.available_patterns);
     }
     else if (data.type === "game_created") {
         console.log("New game created:", data.game_id);
         localStorage.setItem("game_id", data.game_id);
         showJoinLink(data.game_id);
+        populatePatternSelect(data.available_patterns);
     }
     else if (data.type === "history") {
         console.log("History:", data.called_numbers);
@@ -266,9 +273,9 @@ function handleHostSocketMessage(event) {
     }
     else if (data.type === "game_status") {
         console.log("game_status: game status is now " + data.status)
-        // TODO:  Print the status on the screen.  Conditionally disable/enable buttons??
         document.getElementById("gameStatus").innerText =
                                 gameStatusToText(data.status);
+        updatePatternSelectState(data.status, data.pattern_name);
     }
     else if (data.type === "action_rejected") {
         alert(data.action + ": " + data.reason)
@@ -403,6 +410,37 @@ function showJoinLink(game_id) {
         height: 100
     });
 }
+
+function populatePatternSelect(availablePatterns) {
+    if (!availablePatterns) return;
+    const select = document.getElementById("patternSelect");
+    select.innerHTML = "";
+    for (const name of availablePatterns) {
+        const option = document.createElement("option");
+        option.value = name;
+        option.textContent = name;
+        select.appendChild(option);
+    }
+}
+
+function updatePatternSelectState(status, patternName) {
+    const select = document.getElementById("patternSelect");
+    // Only adjustable during SETUP — once a game is in progress or over,
+    // changing the win condition out from under it wouldn't mean anything
+    // (cards are already dealt against whatever pattern was chosen then).
+    select.disabled = (status !== GameStatus.SETUP);
+    if (patternName && select.value !== patternName) {
+        select.value = patternName;
+    }
+}
+
+document.getElementById("patternSelect").onchange = function() {
+    const message = {
+        type: "set_winning_pattern",
+        pattern_name: document.getElementById("patternSelect").value
+    };
+    socket.send(JSON.stringify(message));
+};
 
 document.getElementById("copyJoinLinkButton").onclick = async function() {
     const input = document.getElementById("joinLinkInput");

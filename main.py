@@ -7,6 +7,7 @@ from connection_manager import ConnectionManager
 from game import Game, GameManager, GameStatus, canonicalize_number
 from player import Player
 from bingo_card_factory import create_test_card
+import patterns_parser
 import logging
 
 app = FastAPI()
@@ -15,6 +16,21 @@ game_manager = GameManager()
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 templates = Jinja2Templates(directory="templates")
+
+# Loaded once at server startup. Read-only after this point — every game
+# shares the same registry of available winning patterns; a game only
+# ever holds a reference to one entry (see Game.set_winning_pattern),
+# never its own copy.
+PATTERNS_CONFIG_PATH = "patterns_config.txt"
+DEFAULT_PATTERN_NAME = "standard-bingo"
+
+WINNING_PATTERNS = patterns_parser.load_patterns_from_file(PATTERNS_CONFIG_PATH)
+if DEFAULT_PATTERN_NAME not in WINNING_PATTERNS:
+    raise RuntimeError(
+        f"{PATTERNS_CONFIG_PATH!r} must define a PATTERN named "
+        f"{DEFAULT_PATTERN_NAME!r} — found: {list(WINNING_PATTERNS.keys())}"
+    )
+logger.info(f"Loaded {len(WINNING_PATTERNS)} winning pattern(s): {list(WINNING_PATTERNS.keys())}")
 
 @app.get("/")
 async def join_page(request: Request):
@@ -140,7 +156,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         websocket,
                         json.dumps({
                             "type": "waiting_for_next_game",
-                            "status": game.status.name
+                            "status": game.status.name,
+                            "pattern_name": game.winning_pattern_name
                         })
                     )
                     continue
@@ -197,11 +214,21 @@ async def websocket_endpoint(websocket: WebSocket):
                 logger.info("Created game_id "+game.game_id)
                 game.host_websocket = websocket
                 current_game_id = game.game_id
+                game.set_winning_pattern(DEFAULT_PATTERN_NAME, WINNING_PATTERNS[DEFAULT_PATTERN_NAME])
                 await manager.send_to_player(
                     websocket,
                     json.dumps({
                         "type": "game_created",
-                        "game_id": game.game_id
+                        "game_id": game.game_id,
+                        "available_patterns": list(WINNING_PATTERNS.keys())
+                    })
+                )
+                await manager.send_to_player(
+                    websocket,
+                    json.dumps({
+                        "type": "game_status",
+                        "status": game.status.name,
+                        "pattern_name": game.winning_pattern_name
                     })
                 )
                 
@@ -474,7 +501,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 await manager.broadcast_to_game(
                     json.dumps({
                         "type": "game_status",
-                        "status": game.status.name
+                        "status": game.status.name,
+                        "pattern_name": game.winning_pattern_name
                     }),
                     game
                 )
@@ -538,7 +566,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 await manager.broadcast_to_game(
                     json.dumps({
                         "type": "game_status",
-                        "status": game.status.name
+                        "status": game.status.name,
+                        "pattern_name": game.winning_pattern_name
                     }),
                     game
                 )
@@ -564,7 +593,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 await manager.send_to_player( websocket,
                     json.dumps({
                         "type": "game_status",
-                        "status": game.status.name
+                        "status": game.status.name,
+                        "pattern_name": game.winning_pattern_name
                     })
                 )     
 
@@ -585,7 +615,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 await manager.broadcast_to_game(
                     json.dumps({
                         "type": "game_status",
-                        "status": game.status.name
+                        "status": game.status.name,
+                        "pattern_name": game.winning_pattern_name
                     }),
                     game
                 )
@@ -599,6 +630,51 @@ async def websocket_endpoint(websocket: WebSocket):
                     })
                 )     
                 
+            elif data["type"] == "set_winning_pattern":
+                game = game_manager.get_game(current_game_id)
+                if game is None:
+                    await manager.send_to_player(
+                        websocket,
+                        json.dumps({
+                            "type": "action_rejected",
+                            "action": "set_winning_pattern",
+                            "reason": "no_active_game"
+                        })
+                    )
+                    continue
+                if game.status != GameStatus.SETUP:
+                    await manager.send_to_player(
+                        websocket,
+                        json.dumps({
+                            "type": "action_rejected",
+                            "action": "set_winning_pattern",
+                            "reason": "can_only_change_during_setup"
+                        })
+                    )
+                    continue
+                pattern_name = data.get("pattern_name")
+                pattern = WINNING_PATTERNS.get(pattern_name)
+                if pattern is None:
+                    await manager.send_to_player(
+                        websocket,
+                        json.dumps({
+                            "type": "action_rejected",
+                            "action": "set_winning_pattern",
+                            "reason": "unknown_pattern"
+                        })
+                    )
+                    continue
+                game.set_winning_pattern(pattern_name, pattern)
+                logger.info(f"set_winning_pattern: game {game.game_id} now using {pattern_name!r}")
+                await manager.broadcast_to_game(
+                    json.dumps({
+                        "type": "game_status",
+                        "status": game.status.name,
+                        "pattern_name": game.winning_pattern_name
+                    }),
+                    game
+                )
+
             elif data["type"] == "host_reconnect":
                 game_id = data.get("game_id")
                 game = game_manager.get_game(game_id)
@@ -608,10 +684,14 @@ async def websocket_endpoint(websocket: WebSocket):
                 game.host_websocket = websocket
                 current_game_id = game_id
                 game.touch()
-                await websocket.send_json({"type": "host_reconnected"})
+                await websocket.send_json({
+                    "type": "host_reconnected",
+                    "available_patterns": list(WINNING_PATTERNS.keys())
+                })
                 await websocket.send_json({
                     "type": "game_status",
-                    "status": game.status.name
+                    "status": game.status.name,
+                    "pattern_name": game.winning_pattern_name
                 })
                 await websocket.send_json({
                     "type": "history",
@@ -654,7 +734,8 @@ async def notify_waiting_room(game):
             entry["websocket"],
             json.dumps({
                 "type": "game_status",
-                "status": game.status.name
+                "status": game.status.name,
+                "pattern_name": game.winning_pattern_name
             })
         )
 

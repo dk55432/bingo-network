@@ -67,6 +67,7 @@ WebSocket Status:
 <span id="status">Disconnected</span>
 </p>
 Game Status: <div id="gameStatus">Connecting...</div>
+Winning Pattern: <span id="patternName">---</span>
 <p>Called Numbers: <span id="calledNumbers"></span></p>
 
 <div id="currentNumber"
@@ -234,6 +235,9 @@ function handleSocketMessage(event) {
     else if (data.type === "game_status") {
         document.getElementById("gameStatus").innerText =
             gameStatusToText(data.status);
+        if (data.pattern_name) {
+            document.getElementById("patternName").textContent = data.pattern_name;
+        }
         handle_game_status(data.status);
     }
     else if (data.type === "action_rejected") {

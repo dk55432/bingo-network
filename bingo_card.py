@@ -52,27 +52,13 @@ class BingoCard:
         return False    
     
     
-    # TODO: Need to accommodate more custom bingo winner layouts like postage-stamp
-    def has_bingo(self):
-        # check rows
-        for row in range(5):
-            if all(self.marked[row]):
-                return True
-
-        # check columns
-        for col in range(5):
-            if all(self.marked[row][col] for row in range(5)):
-                return True
-
-        # check diagonal 1
-        if all(self.marked[i][i] for i in range(5)):
-            return True
-
-        # check diagonal 2
-        if all(self.marked[i][4-i] for i in range(5)):
-            return True
-
-        return False
+    # Win-checking used to live here as a hardcoded row/col/diagonal check.
+    # It's now handled by the WinningPattern classes (see winning_pattern.py)
+    # instead — Game.call_number() calls self.winning_pattern.matches(card),
+    # where winning_pattern is whichever pattern was selected for this game
+    # (see patterns_config.txt / patterns_parser.py). This lets a game use
+    # any configured pattern (postage stamp, blackout, etc.), not just
+    # standard bingo, without BingoCard needing to know about any of them.
 
 
     def to_dict(self):

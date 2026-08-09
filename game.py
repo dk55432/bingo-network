@@ -78,6 +78,20 @@ class Game:
         # throwaway id (not a player_id — they aren't real players yet).
         # Promoted into real players once setup_new_game() runs.
         self.waiting_room: dict[str, dict] = {}
+        # Set via set_winning_pattern() — main.py assigns a default
+        # ("standard-bingo", loaded from patterns_config.txt) immediately
+        # after creating a Game, so in normal operation this is never
+        # actually None by the time call_number() runs. It's None here
+        # only as a safe default for callers (e.g. tests) that construct
+        # a bare Game() without going through that wiring — call_number()
+        # treats "no pattern set" as "nobody can win yet" rather than
+        # crashing.
+        self.winning_pattern = None
+        self.winning_pattern_name = None
+
+    def set_winning_pattern(self, name: str, pattern):
+        self.winning_pattern_name = name
+        self.winning_pattern = pattern
 
     def touch(self):
         """Call whenever someone connects or disconnects (join, reconnect,
@@ -178,7 +192,7 @@ class Game:
                     "card": card.to_dict()
                 })
 
-                if card.has_bingo():
+                if self.winning_pattern is not None and self.winning_pattern.matches(card):
                     winners.append({
                         "player_id": player.player_id,
                         "display_name": player.display_name,
@@ -191,10 +205,12 @@ class Game:
                     
     def find_winners(self):
         winners = []
+        if self.winning_pattern is None:
+            return winners
         for player in self.players.values():
             display_name = player.display_name
             for card in player.cards:
-                if card.has_bingo():
+                if self.winning_pattern.matches(card):
                     winners.append(
                         (player, display_name, card)
                     )

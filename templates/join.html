@@ -18,6 +18,7 @@
 
         <div id="errorMessage"></div>
         <div id="gameStatus">Game Status: Connecting...</div>
+        <div id="patternName"></div>
 <p>
 WebSocket Status:
 <span id="status">Disconnected</span>
@@ -166,6 +167,10 @@ WebSocket Status:
                 else if (data.type === "game_status") {
                     document.getElementById("gameStatus").innerText =
                         "Game Status: "+data.status;
+                    if (data.pattern_name) {
+                        document.getElementById("patternName").innerText =
+                            "Winning Pattern: "+data.pattern_name;
+                    }
                         //TODO: disable / enable anything?
                 }
                 else if (data.type === "pong") {
