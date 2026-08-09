@@ -333,9 +333,11 @@ document.getElementById("testCard3").onclick = function() {
 }
 
 document.getElementById("scanCardButton").onclick = function() {
-    console.log("pressed scanCardButton")
-    window.location.href = "/scan";
-}
+  console.log("pressed scanCardButton");
+  const player_id = localStorage.getItem("player_id");
+  const game_id = localStorage.getItem("game_id");
+  window.location.href = `/scan?game_id=${game_id}&player_id=${player_id}`;
+};
 
 function showCurrentNumber(number) {
     document.getElementById("currentNumber").textContent = number;

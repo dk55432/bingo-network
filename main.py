@@ -16,6 +16,9 @@ app = FastAPI()
 app.include_router(scan_router)
 manager = ConnectionManager()
 game_manager = GameManager()
+app.state.game_manager = game_manager
+app.state.connection_manager = manager
+
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 templates = Jinja2Templates(directory="templates")
