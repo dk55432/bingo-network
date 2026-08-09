@@ -6,15 +6,14 @@ from datetime import datetime
 from connection_manager import ConnectionManager
 from game import Game, GameManager, GameStatus, canonicalize_number
 from player import Player
+from bingo_card import BingoCard
 from bingo_card_factory import create_test_card
 import patterns_parser
+from bingo_scan import router as scan_router, numeric_grid_to_labeled_grid, GRID_SIZE
 import logging
-import cv2
-import numpy as np
-import pytesseract
-from fastapi import UploadFile, HTTPException
 
 app = FastAPI()
+app.include_router(scan_router)
 manager = ConnectionManager()
 game_manager = GameManager()
 logger = logging.getLogger(__name__)
@@ -73,162 +72,12 @@ async def host(request: Request):
         name="host.html"
     )   
 
-
-# ---------------------------------------------------------------------------
-# Bingo card image scanning
-#
-# This is the OCR scanning pipeline from bingo_scan.py, integrated into the
-# existing FastAPI app. It intentionally does NOT include bingo_scan.py's
-# database/player/card endpoints because this application already manages
-# players and cards through Game/GameManager and WebSockets.
-#
-# POST an image to /scan-card to receive a 5x5 grid plus a needs_review flag.
-# ---------------------------------------------------------------------------
-
-GRID_SIZE = 5
-WARPED_SIDE = 500  # pixel size of the flattened square card image
-
-# Standard 75-ball bingo column ranges, in card column order.
-COLUMN_RANGES = {
-    0: (1, 15),    # B
-    1: (16, 30),   # I
-    2: (31, 45),   # N (center cell is a free space, handled separately)
-    3: (46, 60),   # G
-    4: (61, 75),   # O
-}
-
-
-def load_image(file_bytes: bytes) -> np.ndarray:
-    """Decode uploaded bytes into an OpenCV BGR image."""
-    arr = np.frombuffer(file_bytes, dtype=np.uint8)
-    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    if img is None:
-        raise HTTPException(status_code=400, detail="Could not decode image")
-    return img
-
-
-def order_points(pts: np.ndarray) -> np.ndarray:
-    """Order 4 points as top-left, top-right, bottom-right, bottom-left."""
-    rect = np.zeros((4, 2), dtype="float32")
-    s = pts.sum(axis=1)
-    rect[0] = pts[np.argmin(s)]      # top-left: smallest x+y
-    rect[2] = pts[np.argmax(s)]      # bottom-right: largest x+y
-    diff = np.diff(pts, axis=1)
-    rect[1] = pts[np.argmin(diff)]   # top-right: smallest x-y
-    rect[3] = pts[np.argmax(diff)]   # bottom-left: largest x-y
-    return rect
-
-
-def find_card_contour(img: np.ndarray) -> np.ndarray:
-    """Locate the largest 4-sided contour in the image, assumed to be the card."""
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    edged = cv2.Canny(blurred, 50, 150)
-    edged = cv2.dilate(edged, None, iterations=1)
-
-    contours, _ = cv2.findContours(edged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    contours = sorted(contours, key=cv2.contourArea, reverse=True)
-
-    for c in contours[:5]:  # only bother checking the largest few
-        peri = cv2.arcLength(c, True)
-        approx = cv2.approxPolyDP(c, 0.02 * peri, True)
-        if len(approx) == 4:
-            return approx.reshape(4, 2)
-
-    raise HTTPException(
-        status_code=422,
-        detail="Could not find a clear card outline. Retake the photo with better contrast/lighting.",
+@app.get("/scan")
+async def scan_page(request: Request):
+    return templates.TemplateResponse(
+        request=request,
+        name="scan.html"
     )
-
-
-def warp_card(img: np.ndarray, corners: np.ndarray) -> np.ndarray:
-    """Perspective-warp the card to a flat WARPED_SIDE x WARPED_SIDE square."""
-    rect = order_points(corners.astype("float32"))
-    dst = np.array(
-        [[0, 0], [WARPED_SIDE - 1, 0], [WARPED_SIDE - 1, WARPED_SIDE - 1], [0, WARPED_SIDE - 1]],
-        dtype="float32",
-    )
-    matrix = cv2.getPerspectiveTransform(rect, dst)
-    return cv2.warpPerspective(img, matrix, (WARPED_SIDE, WARPED_SIDE))
-
-
-def segment_grid(warped: np.ndarray) -> list[list[np.ndarray]]:
-    """Slice the flattened card into a GRID_SIZE x GRID_SIZE list of cell images."""
-    cell_side = WARPED_SIDE // GRID_SIZE
-    cells = []
-    for row in range(GRID_SIZE):
-        row_cells = []
-        for col in range(GRID_SIZE):
-            y0, y1 = row * cell_side, (row + 1) * cell_side
-            x0, x1 = col * cell_side, (col + 1) * cell_side
-            # Shave a small margin off each cell to avoid grid-line noise at the edges.
-            margin = int(cell_side * 0.12)
-            cell = warped[y0 + margin: y1 - margin, x0 + margin: x1 - margin]
-            row_cells.append(cell)
-        cells.append(row_cells)
-    return cells
-
-
-def preprocess_cell(cell: np.ndarray) -> np.ndarray:
-    """Threshold a single cell to clean black-on-white text for OCR."""
-    gray = cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY)
-    # Otsu's threshold works well for consistent, well-lit printed text.
-    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    # Upscale small cells — Tesseract does better with more pixels per character.
-    thresh = cv2.resize(thresh, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-    return thresh
-
-
-def ocr_cell(cell: np.ndarray) -> str:
-    """Run Tesseract on a single cell, restricted to digits."""
-    processed = preprocess_cell(cell)
-    config = "--psm 7 -c tessedit_char_whitelist=0123456789"
-    text = pytesseract.image_to_string(processed, config=config)
-    return text.strip()
-
-
-def validate_cell(row: int, col: int, raw_text: str) -> dict:
-    """Check an OCR'd cell value against the known valid range for its column."""
-    if row == 2 and col == 2:
-        return {"value": None, "is_free_space": True, "valid": True, "raw": raw_text}
-
-    low, high = COLUMN_RANGES[col]
-    is_valid = False
-    value = None
-    if raw_text.isdigit():
-        value = int(raw_text)
-        is_valid = low <= value <= high
-
-    return {"value": value, "is_free_space": False, "valid": is_valid, "raw": raw_text}
-
-
-@app.post("/scan-card")
-async def scan_card(file: UploadFile):
-    if not file.content_type or not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="Uploaded file must be an image")
-
-    file_bytes = await file.read()
-    img = load_image(file_bytes)
-
-    corners = find_card_contour(img)
-    warped = warp_card(img, corners)
-    cell_grid = segment_grid(warped)
-
-    results = []
-    needs_review = False
-    for row in range(GRID_SIZE):
-        result_row = []
-        for col in range(GRID_SIZE):
-            raw_text = ocr_cell(cell_grid[row][col])
-            cell_result = validate_cell(row, col, raw_text)
-            if not cell_result["valid"]:
-                needs_review = True
-            result_row.append(cell_result)
-        results.append(result_row)
-
-    return {"grid": results, "needs_review": needs_review}
-
-
 
 # DAVE: I'm going to do this over the websocket instead of a REST endpoint.
 #       See "create_game" below.   
@@ -607,7 +456,66 @@ async def websocket_endpoint(websocket: WebSocket):
                         "cards": cards_to_dict(player.cards)
                     })
                 )     
-                           
+
+            elif data["type"] == "add_scanned_card":
+                # Client already ran /scan-card (REST — see bingo_scan.py)
+                # and let the player review/correct the result. This adds
+                # the final grid as a real card, same as load_test_cards
+                # does for canned ones — no database involved, it just
+                # goes straight into player.cards like every other card.
+                game = game_manager.get_game(current_game_id)
+                if game is None:
+                    await manager.send_to_player(
+                        websocket,
+                        json.dumps({"type": "reconnect_failed"})
+                    )
+                    continue
+                if game.status != GameStatus.SETUP:
+                    logger.info("add_scanned_card: Can only add cards during status SETUP")
+                    await manager.send_to_player(
+                        websocket,
+                        json.dumps({
+                            "type": "action_rejected",
+                            "action": "add_scanned_card",
+                            "reason": "Can only add cards during status SETUP"
+                        })
+                    )
+                    continue
+
+                player_id = data.get("player_id")
+                player = game.get_player(player_id) if player_id else None
+                if player is None:
+                    await manager.send_to_player(
+                        websocket,
+                        json.dumps({"type": "reconnect_failed"})
+                    )
+                    continue
+
+                numeric_grid = data.get("grid")
+                try:
+                    labeled_grid = numeric_grid_to_labeled_grid(numeric_grid)
+                except (ValueError, TypeError) as e:
+                    logger.info(f"add_scanned_card: rejected grid — {e}")
+                    await manager.send_to_player(
+                        websocket,
+                        json.dumps({
+                            "type": "action_rejected",
+                            "action": "add_scanned_card",
+                            "reason": str(e)
+                        })
+                    )
+                    continue
+
+                card = BingoCard(card_id=None, player_id=player.player_id, grid=labeled_grid)
+                player.add_card(card)
+                logger.info(f"add_scanned_card: added card {card.card_id} for player {player.display_name}")
+                await manager.send_to_player( websocket,
+                    json.dumps({
+                        "type": "cards",
+                        "cards": cards_to_dict(player.cards)
+                    })
+                )
+
             elif data["type"] == "dispose_cards":
                 logger.info("Entering disposeCards block")
                 game = game_manager.get_game(current_game_id)

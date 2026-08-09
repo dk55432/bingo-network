@@ -334,8 +334,7 @@ document.getElementById("testCard3").onclick = function() {
 
 document.getElementById("scanCardButton").onclick = function() {
     console.log("pressed scanCardButton")
-    const player_id = localStorage.getItem("player_id");
-    window.location.href = "/scan.html?player_id="+player_id;
+    window.location.href = "/scan";
 }
 
 function showCurrentNumber(number) {

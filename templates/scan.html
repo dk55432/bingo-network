@@ -207,9 +207,10 @@
 <main>
   <h1>Scan a bingo card</h1>
   <p class="subtitle" id="subtitle">Take a photo, then fix any flagged numbers before saving.</p>
+  <p class="subtitle" style="margin-top:-20px;">WebSocket Status: <span id="wsStatus">Disconnected</span></p>
 
   <div id="noPlayer" class="no-player" style="display:none;">
-    No player_id in the URL — open this page as scan.html?player_id=... from the player page.
+    No player found — open this page from the "Scan cards from phone" button on your player page.
   </div>
 
   <label class="upload-box" id="uploadBox">
@@ -239,18 +240,23 @@
 </main>
 
 <script>
-  // Point this at your FastAPI server.
-  const API_BASE = "http://localhost:8000";
-  // Point this at wherever the player page actually lives.
-  const PLAYER_PAGE = "player.html";
+  // Same-origin, so this works whether the page is loaded as localhost
+  // or a LAN IP (e.g. from a phone) — a hardcoded "http://localhost:8000"
+  // here would silently break for anyone not on the host machine itself.
+  const API_BASE = window.location.origin;
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
 
-  const params = new URLSearchParams(window.location.search);
-  const playerId = params.get("player_id");
+  // Same identity player.html already keeps in localStorage — no URL
+  // params needed, this page is only ever reached via the "Scan cards
+  // from phone" button on that page, same browser, same storage.
+  const playerId = localStorage.getItem("player_id");
+  const gameId = localStorage.getItem("game_id");
 
   const fileInput = document.getElementById("fileInput");
   const uploadBox = document.getElementById("uploadBox");
   const noPlayerEl = document.getElementById("noPlayer");
   const subtitleEl = document.getElementById("subtitle");
+  const wsStatusEl = document.getElementById("wsStatus");
   const statusEl = document.getElementById("status");
   const cardEl = document.getElementById("card");
   const gridEl = document.getElementById("grid");
@@ -262,18 +268,103 @@
   const doneLink = document.getElementById("doneLink");
 
   const scannedThisSession = [];
+  doneLink.href = "/player";
 
-  if (!playerId) {
+  if (!playerId || !gameId) {
     noPlayerEl.style.display = "block";
     uploadBox.style.display = "none";
-  } else {
-    doneLink.href = `${PLAYER_PAGE}?player_id=${encodeURIComponent(playerId)}`;
-    fetch(`${API_BASE}/players/${encodeURIComponent(playerId)}`)
-      .then((res) => (res.ok ? res.json() : null))
-      .then((player) => {
-        if (player) subtitleEl.textContent = `Scanning cards for ${player.player_display_name}.`;
-      })
-      .catch(() => {});
+  }
+
+  // --- WebSocket: same connect/reconnect/heartbeat pattern as player.html,
+  // host.html, join.html. Used only for saving a reviewed card onto the
+  // player's actual card list (real game state) — the OCR step itself
+  // stays a plain REST call below, since it's just "photo in, grid out"
+  // with no game state involved, and file uploads are much simpler over
+  // HTTP than WebSocket.
+  let reconnectAttempts = 0;
+  const MAX_DELAY = 30000;
+  let socket;
+  let missedPings = 0;
+  const MAX_MISSED = 3;
+  let heartbeatTimer;
+
+  function connect() {
+    if (!playerId || !gameId) return; // nothing to connect for
+    socket = new WebSocket(`${protocol}//${window.location.host}/ws`);
+
+    socket.onopen = () => {
+      reconnectAttempts = 0;
+      wsStatusEl.textContent = "Connected";
+      socket.send(JSON.stringify({
+        type: "reconnect",
+        player_id: playerId,
+        game_id: gameId
+      }));
+      startHeartbeat();
+    };
+
+    socket.onclose = () => {
+      wsStatusEl.textContent = "Disconnected";
+      scheduleReconnect();
+      stopHeartbeat();
+    };
+
+    socket.onerror = (err) => {
+      console.error("Socket error", err);
+    };
+
+    socket.onmessage = handleSocketMessage;
+    return socket;
+  }
+  connect();
+
+  function scheduleReconnect() {
+    const delay = Math.min(1000 * 2 ** reconnectAttempts, MAX_DELAY);
+    const jitter = delay * 0.3 * Math.random();
+    reconnectAttempts++;
+    setTimeout(connect, delay + jitter);
+  }
+
+  function startHeartbeat() {
+    heartbeatTimer = setInterval(() => {
+      missedPings++;
+      if (missedPings > MAX_MISSED) {
+        socket.close();
+        return;
+      }
+      socket.send(JSON.stringify({ type: "ping" }));
+    }, 10000);
+  }
+
+  function stopHeartbeat() {
+    clearInterval(heartbeatTimer);
+  }
+
+  function handleSocketMessage(event) {
+    const data = JSON.parse(event.data);
+
+    if (data.type === "reconnected") {
+      console.log("Reconnect successful");
+    }
+    else if (data.type === "reconnect_failed") {
+      // Stale player_id/game_id (e.g. server restarted since we joined).
+      localStorage.removeItem("player_id");
+      window.location.href = "/join";
+    }
+    else if (data.type === "cards") {
+      // Confirms the card we just sent was actually saved.
+      const newest = data.cards[data.cards.length - 1];
+      addToSessionList(newest);
+      resetForNextScan();
+    }
+    else if (data.type === "action_rejected") {
+      savedNote.textContent = `Error: ${data.reason}`;
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = "Save card";
+    }
+    else if (data.type === "pong") {
+      missedPings = 0;
+    }
   }
 
   fileInput.addEventListener("change", async () => {
@@ -332,7 +423,12 @@
     });
   }
 
-  confirmBtn.addEventListener("click", async () => {
+  confirmBtn.addEventListener("click", () => {
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      savedNote.textContent = "Not connected — waiting to reconnect, try again in a moment.";
+      return;
+    }
+
     const grid = [...gridEl.querySelectorAll(".row")].map((rowEl) =>
       [...rowEl.querySelectorAll(".cell")].map((cellEl) => {
         if (cellEl.classList.contains("free")) return null;
@@ -344,24 +440,13 @@
     confirmBtn.disabled = true;
     confirmBtn.textContent = "Saving…";
 
-    try {
-      const res = await fetch(`${API_BASE}/cards`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ player_id: playerId, grid }),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.detail || "Save failed");
-      }
-      const saved = await res.json();
-      addToSessionList(saved);
-      resetForNextScan();
-    } catch (e) {
-      savedNote.textContent = `Error: ${e.message}`;
-      confirmBtn.disabled = false;
-      confirmBtn.textContent = "Save card";
-    }
+    socket.send(JSON.stringify({
+      type: "add_scanned_card",
+      player_id: playerId,
+      grid: grid
+    }));
+    // Response (a "cards" or "action_rejected" message) is handled in
+    // handleSocketMessage above.
   });
 
   function addToSessionList(saved) {

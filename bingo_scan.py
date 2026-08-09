@@ -1,51 +1,39 @@
 """
-Bingo card scanning pipeline.
+Bingo card scanning: turn a photo of a physical bingo card into a grid of
+numbers, for a player who'd rather scan a real card than get a random
+one.
 
-Flow:
-  1. Receive an uploaded photo of a bingo card.
-  2. Find the card's rectangular outline and warp it to a flat, top-down view.
-  3. Slice the flattened card into a 5x5 grid of cells.
-  4. OCR each cell individually with Tesseract (digits only).
-  5. Validate each recognized number against the known B-I-N-G-O column ranges.
-  6. Return the grid as JSON for the client to review/correct before saving.
+This module is pure image-processing + OCR — it has no idea what a Game,
+Player, or in-memory card list is. That's deliberate, and it's also why
+/scan-card is a plain REST endpoint (via APIRouter, included into the
+main FastAPI app) rather than a WebSocket message like everything else
+in this project: FastAPI's UploadFile/python-multipart support makes
+file uploads easy over HTTP, and there's no game state involved in this
+step anyway, just "here's a photo, here's a grid of numbers back."
+
+Saving the reviewed/corrected grid onto a player's actual card list IS
+game state, so that part happens over the existing WebSocket connection
+instead — see the "add_scanned_card" handler in main.py, which uses this
+module's numeric_grid_to_labeled_grid() to convert what the client sends
+into the same "B12"/"FREE"-style grid format bingo_card_factory.py's
+test cards already use, then builds a real BingoCard the normal way.
+No database anywhere in this — scanned cards live in memory in
+player.cards, exactly like test cards do.
 
 Requirements:
-  pip install fastapi uvicorn python-multipart opencv-python-headless pytesseract numpy pillow
+  pip install fastapi python-multipart opencv-python-headless pytesseract numpy
 
-  You also need the Tesseract binary itself installed on the server, e.g.:
+You also need the Tesseract binary itself installed on the server:
     Debian/Ubuntu: apt-get install -y tesseract-ocr
     macOS:         brew install tesseract
 """
 
-import io
-from typing import Optional
-
 import cv2
 import numpy as np
 import pytesseract
-from fastapi import Depends, FastAPI, HTTPException, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
-from sqlmodel import Session
+from fastapi import APIRouter, HTTPException, UploadFile
 
-from database import create_db_and_tables, get_session
-from models import BingoCard, Player
-
-app = FastAPI()
-
-# Adjust allow_origins to wherever player.html/scan.html are actually served from.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-@app.on_event("startup")
-def on_startup():
-    create_db_and_tables()
+router = APIRouter()
 
 GRID_SIZE = 5
 WARPED_SIDE = 500  # pixel size of the flattened square card image
@@ -58,6 +46,7 @@ COLUMN_RANGES = {
     3: (46, 60),   # G
     4: (61, 75),   # O
 }
+COLUMN_LETTERS = ["B", "I", "N", "G", "O"]
 
 
 def load_image(file_bytes: bytes) -> np.ndarray:
@@ -164,7 +153,43 @@ def validate_cell(row: int, col: int, raw_text: str) -> dict:
     return {"value": value, "is_free_space": False, "valid": is_valid, "raw": raw_text}
 
 
-@app.post("/scan-card")
+def numeric_grid_to_labeled_grid(numeric_grid: list) -> list:
+    """Convert the plain 5x5 grid of ints/None the client sends after
+    review (row/col-positioned, e.g. numeric_grid[0][0] == 12) into the
+    "B12"/"FREE"-style labeled grid BingoCard and the rest of the game
+    (mark_number, canonicalize_number, etc.) already expect everywhere
+    else. Raises ValueError on anything that doesn't belong on a real
+    card — missing values, or a number outside its column's range —
+    since a scanned/hand-corrected grid needs the same validation a
+    typed-in number call already gets.
+    """
+    if len(numeric_grid) != GRID_SIZE or any(len(row) != GRID_SIZE for row in numeric_grid):
+        raise ValueError(f"Grid must be {GRID_SIZE}x{GRID_SIZE}")
+
+    labeled = []
+    for row in range(GRID_SIZE):
+        labeled_row = []
+        for col in range(GRID_SIZE):
+            if row == 2 and col == 2:
+                labeled_row.append("FREE")
+                continue
+
+            value = numeric_grid[row][col]
+            if not isinstance(value, int):
+                raise ValueError(f"Missing or invalid value at row {row}, col {col}")
+
+            low, high = COLUMN_RANGES[col]
+            if not (low <= value <= high):
+                raise ValueError(
+                    f"{value} is out of range for column {COLUMN_LETTERS[col]} "
+                    f"({low}-{high}) at row {row}, col {col}"
+                )
+            labeled_row.append(f"{COLUMN_LETTERS[col]}{value}")
+        labeled.append(labeled_row)
+    return labeled
+
+
+@router.post("/scan-card")
 async def scan_card(file: UploadFile):
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Uploaded file must be an image")
@@ -189,74 +214,3 @@ async def scan_card(file: UploadFile):
         results.append(result_row)
 
     return {"grid": results, "needs_review": needs_review}
-
-
-class CreatePlayerRequest(BaseModel):
-    player_display_name: str
-
-
-@app.post("/players")
-def create_player(payload: CreatePlayerRequest, session: Session = Depends(get_session)):
-    # Skip this if players are already created elsewhere in your app —
-    # just make sure the player_id you send to /cards already exists
-    # (or points at your existing players table).
-    player = Player(player_display_name=payload.player_display_name)
-    session.add(player)
-    session.commit()
-    session.refresh(player)
-    return player
-
-
-class ConfirmCardRequest(BaseModel):
-    # The client sends back the final grid after the user has reviewed/corrected
-    # it — a plain 5x5 array of numbers (None for the free space), not the
-    # richer per-cell objects /scan-card returns.
-    player_id: str
-    grid: list[list[Optional[int]]]
-
-
-@app.post("/cards")
-def confirm_card(payload: ConfirmCardRequest, session: Session = Depends(get_session)):
-    if len(payload.grid) != GRID_SIZE or any(len(row) != GRID_SIZE for row in payload.grid):
-        raise HTTPException(status_code=400, detail=f"Grid must be {GRID_SIZE}x{GRID_SIZE}")
-
-    player = session.get(Player, payload.player_id)
-    if not player:
-        raise HTTPException(status_code=404, detail="Player not found")
-
-    card = BingoCard(player_id=payload.player_id, grid=payload.grid)
-    session.add(card)
-    session.commit()
-    session.refresh(card)
-    return card
-
-
-@app.get("/cards/{card_id}")
-def get_card(card_id: int, session: Session = Depends(get_session)):
-    card = session.get(BingoCard, card_id)
-    if not card:
-        raise HTTPException(status_code=404, detail="Card not found")
-    return card
-
-
-@app.get("/players/{player_id}")
-def get_player(player_id: str, session: Session = Depends(get_session)):
-    player = session.get(Player, player_id)
-    if not player:
-        raise HTTPException(status_code=404, detail="Player not found")
-    return player
-
-
-@app.get("/players/{player_id}/cards")
-def list_player_cards(player_id: str, session: Session = Depends(get_session)):
-    player = session.get(Player, player_id)
-    if not player:
-        raise HTTPException(status_code=404, detail="Player not found")
-    return player.cards
-
-
-# Serve scan.html, player.html, etc. as plain static files.
-# This MUST be added after all the @app.get/@app.post routes above —
-# it acts as a catch-all for any path not already matched, so if it were
-# registered first it would shadow your API routes.
-app.mount("/", StaticFiles(directory="static", html=True), name="static")
