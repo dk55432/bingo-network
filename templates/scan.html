@@ -57,6 +57,50 @@
   .upload-label { font-weight: 500; font-size: 15px; }
   .upload-hint { color: var(--muted); font-size: 13px; margin-top: 4px; }
 
+  .manual-entry {
+    margin-top: 14px;
+    padding: 16px;
+    background: var(--card);
+    border: 1.5px solid var(--line);
+    border-radius: 12px;
+  }
+
+  .manual-entry-label {
+    display: block;
+    font-family: 'Space Grotesk', sans-serif;
+    font-weight: 700;
+    font-size: 14px;
+    margin-bottom: 4px;
+  }
+
+  .manual-entry-hint {
+    color: var(--muted);
+    font-size: 12.5px;
+    margin: 0 0 10px;
+    line-height: 1.4;
+  }
+
+  .manual-entry textarea {
+    width: 100%;
+    resize: vertical;
+    border: 1.5px solid var(--line);
+    border-radius: 8px;
+    padding: 10px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 14px;
+    color: var(--ink);
+    box-sizing: border-box;
+  }
+
+  .manual-entry textarea:focus { outline: 2px solid var(--stamp-blue); outline-offset: -1px; }
+
+  .manual-entry-status {
+    font-size: 13px;
+    color: var(--stamp-red);
+    margin-top: 8px;
+    min-height: 18px;
+  }
+
   .status { font-size: 14px; color: var(--muted); margin: 16px 0; min-height: 20px; }
 
   #card {
@@ -254,6 +298,18 @@
     <div class="upload-hint">You'll adjust the corners next — cropping tight is fine</div>
   </label>
 
+  <div class="manual-entry">
+    <label class="manual-entry-label" for="manualEntryInput">Manual entry</label>
+    <p class="manual-entry-hint">
+      Read down each column: B (5 numbers), I (5), N (4 — center is free), G (5), O (5) — 24 total.
+      Separate with spaces or commas. Works well with your phone's dictation mic.
+    </p>
+    <textarea id="manualEntryInput" rows="3"
+      placeholder="1 2 3 4 5 16 17 18 19 20 31 32 33 34 46 47 48 49 50 61 62 63 64 65"></textarea>
+    <button class="scan-another" id="manualEntryBtn">Use these numbers</button>
+    <div class="manual-entry-status" id="manualEntryStatus"></div>
+  </div>
+
   <div class="status" id="status"></div>
 
   <div id="cornerPicker" style="display:none;">
@@ -313,6 +369,10 @@
   const cornerSvg = document.getElementById("cornerSvg");
   const confirmCornersBtn = document.getElementById("confirmCornersBtn");
   const retakeBtn = document.getElementById("retakeBtn");
+
+  const manualEntryInput = document.getElementById("manualEntryInput");
+  const manualEntryBtn = document.getElementById("manualEntryBtn");
+  const manualEntryStatus = document.getElementById("manualEntryStatus");
 
   const scannedThisSession = [];
 
@@ -483,6 +543,59 @@
       gridEl.appendChild(rowEl);
     });
   }
+
+  // Standard 75-ball column ranges, same as the server uses to validate
+  // OCR results — reused here so a manually-entered number that's out of
+  // range for its column gets the same "flagged, please check" treatment.
+  const COLUMN_RANGES = [[1, 15], [16, 30], [31, 45], [46, 60], [61, 75]];
+
+  function parseManualEntryNumbers(text) {
+    const tokens = text.trim().split(/[\s,]+/).filter((t) => t.length > 0);
+    if (tokens.length !== 24) {
+      return { error: `Expected 24 numbers, got ${tokens.length}.` };
+    }
+    const numbers = tokens.map((t) => parseInt(t, 10));
+    if (numbers.some((n) => Number.isNaN(n))) {
+      return { error: "Couldn't read one of those as a number — check for typos." };
+    }
+    return { numbers };
+  }
+
+  function manualNumbersToGrid(numbers) {
+    // Filled column-major (all of B, then all of I, ...) to match how
+    // someone reads down a physical card — but stored as the same
+    // row-major 5x5 array renderGrid() and the save step already expect.
+    const grid = Array.from({ length: 5 }, () => Array(5).fill(null));
+    let idx = 0;
+    for (let col = 0; col < 5; col++) {
+      for (let row = 0; row < 5; row++) {
+        if (row === 2 && col === 2) {
+          grid[row][col] = { is_free_space: true };
+          continue;
+        }
+        const value = numbers[idx++];
+        const [low, high] = COLUMN_RANGES[col];
+        grid[row][col] = { value, is_free_space: false, valid: value >= low && value <= high };
+      }
+    }
+    return grid;
+  }
+
+  manualEntryBtn.addEventListener("click", () => {
+    const result = parseManualEntryNumbers(manualEntryInput.value);
+    if (result.error) {
+      manualEntryStatus.textContent = result.error;
+      return;
+    }
+    manualEntryStatus.textContent = "";
+
+    uploadBox.style.display = "none";
+    cornerPicker.style.display = "none";
+    statusEl.textContent = "Entered manually — double-check any flagged numbers, then save.";
+    renderGrid(manualNumbersToGrid(result.numbers));
+    cardEl.style.display = "block";
+    confirmBtn.disabled = false;
+  });
 
   confirmBtn.addEventListener("click", async () => {
     const grid = [...gridEl.querySelectorAll(".row")].map((rowEl) =>
