@@ -99,6 +99,174 @@ X----
 ---X-
 ----X
 
+MASK six-pack-vert-1
+XX---
+XX---
+XX---
+-----
+-----
+
+MASK six-pack-vert-2
+-----
+XX---
+XX---
+XX---
+-----
+
+MASK six-pack-vert-3
+-----
+-----
+XX---
+XX---
+XX---
+
+MASK six-pack-vert-4
+-XX--
+-XX--
+-XX--
+-----
+-----
+
+MASK six-pack-vert-5
+-----
+-XX--
+-XX--
+-XX--
+-----
+
+MASK six-pack-vert-6
+-----
+-----
+-XX--
+-XX--
+-XX--
+
+MASK six-pack-vert-7
+--XX-
+--XX-
+--XX-
+-----
+-----
+
+MASK six-pack-vert-8
+-----
+--XX-
+--XX-
+--XX-
+-----
+
+MASK six-pack-vert-9
+-----
+-----
+--XX-
+--XX-
+--XX-
+
+MASK six-pack-vert-10
+---XX
+---XX
+---XX
+-----
+-----
+
+MASK six-pack-vert-11
+-----
+---XX
+---XX
+---XX
+-----
+
+MASK six-pack-vert-12
+-----
+-----
+---XX
+---XX
+---XX
+
+MASK six-pack-horiz-1
+XXX--
+XXX--
+-----
+-----
+-----
+
+MASK six-pack-horiz-2
+-XXX-
+-XXX-
+-----
+-----
+-----
+
+MASK six-pack-horiz-3
+--XXX
+--XXX
+-----
+-----
+-----
+
+MASK six-pack-horiz-4
+-----
+XXX--
+XXX--
+-----
+-----
+
+MASK six-pack-horiz-5
+-----
+-XXX-
+-XXX-
+-----
+-----
+
+MASK six-pack-horiz-6
+-----
+--XXX
+--XXX
+-----
+-----
+
+MASK six-pack-horiz-7
+-----
+-----
+XXX--
+XXX--
+-----
+
+MASK six-pack-horiz-8
+-----
+-----
+-XXX-
+-XXX-
+-----
+
+MASK six-pack-horiz-9
+-----
+-----
+--XXX
+--XXX
+-----
+
+MASK six-pack-horiz-10
+-----
+-----
+-----
+XXX--
+XXX--
+
+MASK six-pack-horiz-11
+-----
+-----
+-----
+-XXX-
+-XXX-
+
+MASK six-pack-horiz-12
+-----
+-----
+-----
+--XXX
+--XXX
+
 # ------------------------------------------------------------
 # PATTERNS
 # Format:
@@ -145,11 +313,6 @@ X----
 # This would translate into (col0 AND col4) OR (row0 AND row4).
 # ------------------------------------------------------------
 
-PATTERN top3-and-bottom3
-AND
-    AtLeast(row0, 3)
-    AtLeast(row4, 3)
-
 PATTERN standard-bingo
 OR
     row0
@@ -165,8 +328,58 @@ OR
     diagonal-bottomleft-upperright
     diagonal-upperleft-bottomright
 
+PATTERN hardway
+OR
+    row0
+    row1
+    row2
+    row3
+    row4
+    col0
+    col1
+    col2
+    col3
+    col4
+
+PATTERN top-or-bottom
+OR
+    row0
+    row4
+
+PATTERN six-pack
+OR
+    six-pack-vert-1
+    six-pack-vert-2
+    six-pack-vert-3
+    six-pack-vert-4
+    six-pack-vert-5
+    six-pack-vert-6
+    six-pack-vert-7
+    six-pack-vert-8
+    six-pack-vert-9
+    six-pack-vert-10
+    six-pack-vert-11
+    six-pack-vert-12
+    six-pack-horiz-1
+    six-pack-horiz-2
+    six-pack-horiz-3
+    six-pack-horiz-4
+    six-pack-horiz-5
+    six-pack-horiz-6
+    six-pack-horiz-7
+    six-pack-horiz-8
+    six-pack-horiz-9
+    six-pack-horiz-10
+    six-pack-horiz-11
+    six-pack-horiz-12
+
 PATTERN diagonals
 OR
     diagonal-bottomleft-upperright
     diagonal-upperleft-bottomright
+
+PATTERN top3-and-bottom3
+AND
+    AtLeast(row0, 3)
+    AtLeast(row4, 3)
 
