@@ -4,13 +4,17 @@ live player in a live game (no database — everything here is in-memory,
 matching how Game/Player/BingoCard already work).
 
 Flow:
-  1. POST /scan-card: photo in, OCR'd grid + confidence out. Stateless —
-     doesn't touch game/player state, just runs the CV/OCR pipeline.
-  2. Client reviews/corrects the grid (scan.html).
-  3. POST /cards: {game_id, player_id, grid} in. Looks up the live Game
-     and Player, converts the numeric grid to BingoCard's "B1"/"N31"/"FREE"
-     label format, and calls player.add_card(...) directly on the live
-     in-memory object — same object the websocket loop reads from.
+  1. POST /scan-card: photo in, one OCR'd grid per detected card out
+     (a strip can have multiple stacked cards — see split_into_cards()
+     in pipeline.py). Stateless — doesn't touch game/player state, just
+     runs the CV/OCR pipeline.
+  2. Client reviews/corrects each grid (scan.html).
+  3. POST /cards: {game_id, player_id, grids} in — one or more grids at
+     once, since a single strip scan can produce several cards. Looks up
+     the live Game and Player, converts each numeric grid to BingoCard's
+     "B1"/"N31"/"FREE" label format, and calls player.add_card(...)
+     directly on the live in-memory object — same object the websocket
+     loop reads from.
 
 Requirements:
   pip install fastapi python-multipart opencv-python-headless pytesseract numpy
@@ -36,6 +40,7 @@ from pipeline import (
     load_image,
     ocr_cell,
     segment_grid,
+    split_into_cards,
     validate_cell,
     warp_card,
 )
@@ -78,6 +83,24 @@ def numeric_grid_to_labeled_grid(grid: list[list[Optional[int]]]) -> list[list[s
     return labeled
 
 
+def _ocr_one_card(card_img) -> dict:
+    """Run the per-cell OCR loop over a single card's already-cropped
+    (header-free) grid image, returning {"grid": ..., "needs_review": ...}."""
+    results = []
+    needs_review = False
+    for row in range(GRID_SIZE):
+        result_row = []
+        for col in range(GRID_SIZE):
+            raw_text, confidence = ocr_cell(card_img[row][col])
+            cell_result = validate_cell(row, col, raw_text)
+            cell_result["confidence"] = round(confidence, 1)
+            if not cell_result["valid"]:
+                needs_review = True
+            result_row.append(cell_result)
+        results.append(result_row)
+    return {"grid": results, "needs_review": needs_review}
+
+
 @router.post("/scan-card")
 async def scan_card(file: UploadFile, corners: Optional[str] = Form(None)):
     if not file.content_type or not file.content_type.startswith("image/"):
@@ -108,22 +131,15 @@ async def scan_card(file: UploadFile, corners: Optional[str] = Form(None)):
             raise HTTPException(status_code=422, detail=str(e))
 
     warped = warp_card(img, card_corners)
-    cell_grid = segment_grid(warped)
 
-    results = []
-    needs_review = False
-    for row in range(GRID_SIZE):
-        result_row = []
-        for col in range(GRID_SIZE):
-            raw_text, confidence = ocr_cell(cell_grid[row][col])
-            cell_result = validate_cell(row, col, raw_text)
-            cell_result["confidence"] = round(confidence, 1)
-            if not cell_result["valid"]:
-                needs_review = True
-            result_row.append(cell_result)
-        results.append(result_row)
+    # A strip can have one card or several stacked cards — split_into_cards
+    # finds each card's header band and returns one cropped grid image per
+    # card (falling back to "the whole thing is one card" if no header
+    # band is detected at all, e.g. an already-tightly-cropped single card).
+    card_images = split_into_cards(warped)
+    cards = [_ocr_one_card(segment_grid(card_img)) for card_img in card_images]
 
-    return {"grid": results, "needs_review": needs_review}
+    return {"cards": cards}
 
 
 @router.get("/games/{game_id}/players/{player_id}")
@@ -138,16 +154,17 @@ def get_live_player(game_id: str, player_id: str, request: Request):
     return {"player_id": player.player_id, "display_name": player.display_name}
 
 
-class ConfirmCardRequest(BaseModel):
+class ConfirmCardsRequest(BaseModel):
     game_id: str
     player_id: str
-    # Plain 5x5 array of numbers after client-side review/correction;
-    # None for the free space.
-    grid: list[list[Optional[int]]]
+    # One plain 5x5 array of numbers per card, after client-side
+    # review/correction; None for each free space. A single strip scan
+    # can produce several of these at once.
+    grids: list[list[list[Optional[int]]]]
 
 
 @router.post("/cards")
-async def confirm_card(payload: ConfirmCardRequest, request: Request):
+async def confirm_cards(payload: ConfirmCardsRequest, request: Request):
     # game_manager (and, for the websocket push below, the connection
     # manager) are stashed on app.state by main.py — see the setup note
     # below. Using app.state instead of importing main.py directly avoids
@@ -162,16 +179,23 @@ async def confirm_card(payload: ConfirmCardRequest, request: Request):
     if player is None:
         raise HTTPException(status_code=404, detail="Player not found in this game")
 
-    if len(payload.grid) != GRID_SIZE or any(len(row) != GRID_SIZE for row in payload.grid):
-        raise HTTPException(status_code=400, detail=f"Grid must be {GRID_SIZE}x{GRID_SIZE}")
+    if not payload.grids:
+        raise HTTPException(status_code=400, detail="No grids to save")
+
+    for i, grid in enumerate(payload.grids):
+        if len(grid) != GRID_SIZE or any(len(row) != GRID_SIZE for row in grid):
+            raise HTTPException(status_code=400, detail=f"Grid {i} must be {GRID_SIZE}x{GRID_SIZE}")
 
     try:
-        labeled_grid = numeric_grid_to_labeled_grid(payload.grid)
+        labeled_grids = [numeric_grid_to_labeled_grid(g) for g in payload.grids]
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    card = BingoCard(card_id=None, player_id=payload.player_id, grid=labeled_grid)
-    player.add_card(card)
+    saved_cards = []
+    for labeled_grid in labeled_grids:
+        card = BingoCard(card_id=None, player_id=payload.player_id, grid=labeled_grid)
+        player.add_card(card)
+        saved_cards.append(card)
     game.touch()
 
     # If this player has a live websocket connection open elsewhere (e.g. a
@@ -192,4 +216,4 @@ async def confirm_card(payload: ConfirmCardRequest, request: Request):
         except Exception:
             pass  # don't fail the scan just because the push failed
 
-    return card.to_dict()
+    return [c.to_dict() for c in saved_cards]
