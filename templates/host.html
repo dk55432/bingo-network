@@ -28,6 +28,11 @@
     width: 38px;
     text-align: center;
     font-size: 18px;
+    cursor: pointer;
+}
+
+.host-num:hover {
+    text-decoration: underline;
 }
 
 .marked { background-color: yellow; font-weight: bold; }
@@ -341,6 +346,16 @@ function drawHostBoardDoubles(containerId = "hostBoard") {
 
   html += "</table>";
   container.innerHTML = html;
+
+  container.querySelectorAll(".host-num").forEach(el => {
+
+      el.onclick = function() {
+
+          previewNumber(el.dataset.bingo);
+
+      };
+
+  });
 }
 
 function markCalledNumberHost(calledNumber) {
@@ -386,6 +401,27 @@ function canonicalizeBingoCall(input) {
   return `${letter}${n}`;
 }
 
+function previewNumber(value) {
+
+    pendingNumber = canonicalizeBingoCall(value);
+
+    if (pendingNumber === null) {
+
+        document.getElementById("preview").textContent =
+            "Invalid number ? check the console for details.";
+
+        document.getElementById("broadcastButton").disabled = true;
+
+        return;
+    }
+
+    document.getElementById("numberInput").value = pendingNumber;
+
+    document.getElementById("preview").textContent =
+        "Ready to broadcast: " + pendingNumber;
+
+    document.getElementById("broadcastButton").disabled = false;
+}
 
 function handle_winners(winners) {
     str = "The following card(s) have BINGO:\n";
@@ -459,21 +495,12 @@ document.getElementById("copyJoinLinkButton").onclick = async function() {
 
 
 document.getElementById("previewButton").onclick = function() {
-    pendingNumber =
-        canonicalizeBingoCall(document.getElementById("numberInput").value);
 
-    if (pendingNumber === null) {
-        document.getElementById("preview").textContent =
-            "Invalid number — check the console for details.";
-        document.getElementById("broadcastButton").disabled = true;
-        return;
-    }
+    previewNumber(
+        document.getElementById("numberInput").value
+    );
 
-    document.getElementById("preview").textContent =
-        "Ready to broadcast: " + pendingNumber;
-    document.getElementById("broadcastButton").disabled = false;
 };
-
 
 
 document.getElementById("broadcastButton").onclick = function() {
