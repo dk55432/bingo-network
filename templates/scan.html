@@ -111,6 +111,17 @@
     box-shadow: 0 1px 2px rgba(28,35,64,0.06), 0 8px 24px rgba(28,35,64,0.06);
   }
 
+  .card-review { margin-bottom: 22px; }
+  .card-review:last-child { margin-bottom: 0; }
+
+  .card-review-title {
+    font-family: 'Space Grotesk', sans-serif;
+    font-weight: 700;
+    font-size: 14px;
+    color: var(--muted);
+    margin-bottom: 8px;
+  }
+
   .headers, .row {
     display: grid;
     grid-template-columns: repeat(5, 1fr);
@@ -323,10 +334,7 @@
   </div>
 
   <div id="card">
-    <div class="headers">
-      <span>B</span><span>I</span><span>N</span><span>G</span><span>O</span>
-    </div>
-    <div id="grid"></div>
+    <div id="cardsContainer"></div>
     <div class="legend"><span class="swatch"></span> flagged — check this number</div>
     <button class="confirm" id="confirmBtn" disabled>Save card</button>
     <div class="saved-note" id="savedNote"></div>
@@ -355,7 +363,7 @@
   const subtitleEl = document.getElementById("subtitle");
   const statusEl = document.getElementById("status");
   const cardEl = document.getElementById("card");
-  const gridEl = document.getElementById("grid");
+  const cardsContainer = document.getElementById("cardsContainer");
   const confirmBtn = document.getElementById("confirmBtn");
   const savedNote = document.getElementById("savedNote");
   const sessionListEl = document.getElementById("sessionList");
@@ -505,11 +513,14 @@
         throw new Error(err.detail || "Scan failed");
       }
       const data = await res.json();
-      renderGrid(data.grid);
-      statusEl.textContent = data.needs_review
-        ? "Some numbers need a check — flagged in red below."
-        : "Looks good — review, then save.";
+      renderCards(data.cards);
+      const anyNeedsReview = data.cards.some((c) => c.needs_review);
+      const cardWord = data.cards.length === 1 ? "card" : `${data.cards.length} cards`;
+      statusEl.textContent = anyNeedsReview
+        ? `Found ${cardWord} — some numbers need a check, flagged in red below.`
+        : `Found ${cardWord} — review, then save.`;
       cardEl.style.display = "block";
+      confirmBtn.textContent = data.cards.length === 1 ? "Save card" : `Save ${data.cards.length} cards`;
       confirmBtn.disabled = false;
     } catch (e) {
       statusEl.textContent = `Error: ${e.message}`;
@@ -517,7 +528,22 @@
     }
   });
 
-  function renderGrid(grid) {
+  function renderCards(cardsData) {
+    cardsContainer.innerHTML = "";
+    cardsData.forEach((cardData, idx) => {
+      const block = document.createElement("div");
+      block.className = "card-review";
+      block.innerHTML = `
+        ${cardsData.length > 1 ? `<div class="card-review-title">Card ${idx + 1} of ${cardsData.length}</div>` : ""}
+        <div class="headers"><span>B</span><span>I</span><span>N</span><span>G</span><span>O</span></div>
+        <div class="grid"></div>
+      `;
+      cardsContainer.appendChild(block);
+      renderGridInto(block.querySelector(".grid"), cardData.grid);
+    });
+  }
+
+  function renderGridInto(gridEl, grid) {
     gridEl.innerHTML = "";
     grid.forEach((row) => {
       const rowEl = document.createElement("div");
@@ -564,7 +590,7 @@
   function manualNumbersToGrid(numbers) {
     // Filled column-major (all of B, then all of I, ...) to match how
     // someone reads down a physical card — but stored as the same
-    // row-major 5x5 array renderGrid() and the save step already expect.
+    // row-major 5x5 array renderCards()/renderGridInto() and the save step already expect.
     const grid = Array.from({ length: 5 }, () => Array(5).fill(null));
     let idx = 0;
     for (let col = 0; col < 5; col++) {
@@ -592,40 +618,51 @@
     uploadBox.style.display = "none";
     cornerPicker.style.display = "none";
     statusEl.textContent = "Entered manually — double-check any flagged numbers, then save.";
-    renderGrid(manualNumbersToGrid(result.numbers));
+    renderCards([{ grid: manualNumbersToGrid(result.numbers), needs_review: false }]);
     cardEl.style.display = "block";
+    confirmBtn.textContent = "Save card";
     confirmBtn.disabled = false;
   });
 
   confirmBtn.addEventListener("click", async () => {
-    const grid = [...gridEl.querySelectorAll(".row")].map((rowEl) =>
-      [...rowEl.querySelectorAll(".cell")].map((cellEl) => {
-        if (cellEl.classList.contains("free")) return null;
-        const val = cellEl.querySelector("input").value.trim();
-        return val === "" ? null : parseInt(val, 10);
-      })
+    const grids = [...cardsContainer.querySelectorAll(".card-review")].map((block) =>
+      [...block.querySelectorAll(".row")].map((rowEl) =>
+        [...rowEl.querySelectorAll(".cell")].map((cellEl) => {
+          if (cellEl.classList.contains("free")) return null;
+          const val = cellEl.querySelector("input").value.trim();
+          return val === "" ? null : parseInt(val, 10);
+        })
+      )
     );
 
     confirmBtn.disabled = true;
     confirmBtn.textContent = "Saving…";
 
     try {
+      
+      const msg = {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ game_id: gameId, player_id: playerId, grids }),
+      };
+      console.log(msg);
+
       const res = await fetch(`${API_BASE}/cards`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ game_id: gameId, player_id: playerId, grid }),
+        body: JSON.stringify({ game_id: gameId, player_id: playerId, grids }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.detail || "Save failed");
       }
-      const saved = await res.json();
-      addToSessionList(saved);
+      const savedCards = await res.json();
+      savedCards.forEach(addToSessionList);
       resetForNextScan();
     } catch (e) {
       savedNote.textContent = `Error: ${e.message}`;
       confirmBtn.disabled = false;
-      confirmBtn.textContent = "Save card";
+      confirmBtn.textContent = grids.length === 1 ? "Save card" : `Save ${grids.length} cards`;
     }
   });
 

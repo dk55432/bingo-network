@@ -644,6 +644,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     game
                 )
                 await notify_waiting_room(game)
+                
             elif data["type"] == "request_game_status":
                 # join.html sends game_id explicitly since that connection
                 # hasn't joined a game yet, so current_game_id isn't set.

@@ -1,4 +1,9 @@
 from fastapi import WebSocket
+import logging
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+# logging.basicConfig(level=logging.DEBUG)
 
 class ConnectionManager:
 
@@ -6,10 +11,12 @@ class ConnectionManager:
         self.active_connections: list[WebSocket] = []
 
     async def connect(self, websocket: WebSocket):
+        logger.debug(f"About to connect() on websocket id={id(websocket)}")
         await websocket.accept()
         self.active_connections.append(websocket)
 
     def disconnect(self, websocket: WebSocket):
+        logger.debug(f"About to disconnect() on websocket id={id(websocket)}")
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
 
@@ -52,6 +59,7 @@ class ConnectionManager:
                 self.disconnect(connection)
                     
     async def send_to_player(self, websocket, message):
+        logger.debug(f"About to send message '{message}' on websocket id={id(websocket)}")
         if websocket is None:
             return
         await websocket.send_text(message)        

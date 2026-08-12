@@ -383,3 +383,11 @@ AND
     AtLeast(row0, 3)
     AtLeast(row4, 3)
 
+PATTERN blackout
+AND
+    row0
+    row1
+    row2
+    row3
+    row4
+
