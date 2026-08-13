@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.templating import Jinja2Templates
+from fastapi.staticfiles import StaticFiles
 import json
 import uuid
 from datetime import datetime
@@ -13,6 +14,8 @@ from bingo_scan import router as scan_router, numeric_grid_to_labeled_grid, GRID
 import logging
 
 app = FastAPI()
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
 app.include_router(scan_router)
 manager = ConnectionManager()
 game_manager = GameManager()

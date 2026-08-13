@@ -13,7 +13,7 @@ export CARD_FIXTURES_JSON='[
     [5,20,35,50,65]
   ]
 ]'
-export WS_URL="ws://192.168.1.154:8000/ws"
-export API_BASE="http://192.168.1.154:8000"
+export WS_URL="ws://192.168.1.234:8000/ws"
+export API_BASE="http://192.168.1.234:8000"
 
 node simulate_game.mjs

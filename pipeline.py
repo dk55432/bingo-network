@@ -171,7 +171,17 @@ def find_card_grid_regions(warped: np.ndarray, min_band_height_frac: float = 0.0
     for i, (h_start, h_end) in enumerate(header_runs):
         grid_top = h_end
         grid_bottom = header_runs[i + 1][0] if i + 1 < len(header_runs) else height
-        regions.append((grid_top, grid_bottom))
+        if grid_bottom > grid_top:
+            regions.append((grid_top, grid_bottom))
+        # else: degenerate region (e.g. two header bands detected right
+        # next to each other, or a header detected right at the image's
+        # bottom edge) — discard rather than returning an empty crop.
+
+    if not regions:
+        # Every candidate region was degenerate — fall back to treating
+        # the whole image as one card, same as the "no header detected"
+        # case above, rather than returning nothing at all.
+        return [(0, height)]
     return regions
 
 
@@ -187,6 +197,9 @@ def trim_grid_bottom(card_img: np.ndarray, min_density_frac: float = 0.15) -> np
     with real ink density (a full row of bold digits + grid lines is
     much denser than a thin footer line or blank gap).
     """
+    if card_img.size == 0 or card_img.shape[0] == 0 or card_img.shape[1] == 0:
+        return card_img  # nothing to trim on an empty/degenerate crop
+
     gray = cv2.cvtColor(card_img, cv2.COLOR_BGR2GRAY)
     dark = gray < 128
     row_density = dark.mean(axis=1)

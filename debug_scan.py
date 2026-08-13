@@ -31,10 +31,12 @@ cell in one column is empty, or confidence is uniformly low).
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 from pipeline import (
     COLUMN_RANGES,
@@ -52,7 +54,7 @@ from pipeline import (
 COLUMN_LETTERS = ["B", "I", "N", "G", "O"]
 
 
-def run(image_path: Path, psm: int, threshold_method: str, margin_pct: float):
+def run(image_path: Path, psm: int, threshold_method: str, margin_pct: float, corners_arg: str | None = None):
     out_dir = Path("debug_output") / image_path.stem
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -63,23 +65,41 @@ def run(image_path: Path, psm: int, threshold_method: str, margin_pct: float):
         print(f"FAILED to load image: {e}")
         sys.exit(1)
 
-    debug = {}
-    try:
-        corners = find_card_contour(img, debug=debug)
-    except CardNotFoundError as e:
-        # Still save what we found so you can see WHY it failed.
-        if "edges" in debug:
-            cv2.imwrite(str(out_dir / "01_edges.jpg"), debug["edges"])
-        if "contour_overlay" in debug:
-            cv2.imwrite(str(out_dir / "02_contour.jpg"), debug["contour_overlay"])
-        print(f"FAILED to find card outline: {e}")
-        print(f"Check {out_dir}/01_edges.jpg — if the card's edges aren't clean")
-        print("continuous lines there, that's your problem (lighting/background/contrast).")
-        sys.exit(1)
+    if corners_arg:
+        # Manual corners, same as scan.html's drag handles send to the
+        # real app — skips auto-detection entirely, same as bingo_scan.py
+        # does when the client provides them.
+        try:
+            pts = json.loads(corners_arg)
+            if not (isinstance(pts, list) and len(pts) == 4 and all(len(p) == 2 for p in pts)):
+                raise ValueError("must be a list of exactly 4 [x, y] pairs")
+            corners = np.array(pts, dtype="float32")
+        except (json.JSONDecodeError, ValueError, TypeError) as e:
+            print(f"FAILED to parse --corners: {e}")
+            sys.exit(1)
+        print("Using manually-provided corners (auto-detection skipped)")
+    else:
+        debug = {}
+        try:
+            corners = find_card_contour(img, debug=debug)
+        except CardNotFoundError as e:
+            # Still save what we found so you can see WHY it failed.
+            if "edges" in debug:
+                cv2.imwrite(str(out_dir / "01_edges.jpg"), debug["edges"])
+            if "contour_overlay" in debug:
+                cv2.imwrite(str(out_dir / "02_contour.jpg"), debug["contour_overlay"])
+            print(f"FAILED to find card outline: {e}")
+            print(f"Check {out_dir}/01_edges.jpg — if the card's edges aren't clean")
+            print("continuous lines there, that's your problem (lighting/background/contrast).")
+            print()
+            print("If you know this photo needs manual corners in the real app too, skip")
+            print("auto-detection here the same way: python debug_scan.py "
+                  f"{image_path} --corners '[[x1,y1],[x2,y2],[x3,y3],[x4,y4]]'")
+            sys.exit(1)
 
-    cv2.imwrite(str(out_dir / "01_edges.jpg"), debug["edges"])
-    cv2.imwrite(str(out_dir / "02_contour.jpg"), debug["contour_overlay"])
-    print(f"Card outline found OK -> {out_dir}/02_contour.jpg (check the red box is tight on the card)")
+        cv2.imwrite(str(out_dir / "01_edges.jpg"), debug["edges"])
+        cv2.imwrite(str(out_dir / "02_contour.jpg"), debug["contour_overlay"])
+        print(f"Card outline found OK -> {out_dir}/02_contour.jpg (check the red box is tight on the card)")
 
     warped = warp_card(img, corners)
     cv2.imwrite(str(out_dir / "03_warped.jpg"), warped)
@@ -136,15 +156,23 @@ def run(image_path: Path, psm: int, threshold_method: str, margin_pct: float):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("image", type=Path, help="Path to a card photo (.jpg/.png)")
+    parser.add_argument(
+        "--corners", type=str, default=None,
+        help="Manually specify the 4 card corners as a JSON list, e.g. "
+        "'[[120,80],[900,95],[890,1200],[110,1180]]', in original-image pixel "
+        "coordinates, any order. Skips auto-detection entirely — use this for "
+        "any photo where auto-detection fails or picks the wrong outline, "
+        "same as scan.html's drag-corner picker does for the real app.",
+    )
     parser.add_argument("--psm", type=int, default=7, help="Tesseract page segmentation mode (try 7 or 8)")
     parser.add_argument(
         "--threshold", dest="threshold_method", choices=["otsu", "adaptive"], default="otsu",
         help="Cell thresholding method: 'otsu' (even lighting) or 'adaptive' (uneven lighting/shadows)",
     )
     parser.add_argument(
-        "--margin", type=float, default=0.12,
+        "--margin", type=float, default=0.06,
         help="Fraction of each cell to trim as margin (increase if grid lines are getting OCR'd, "
-        "decrease if digits are getting cut off)",
+        "decrease if digits are getting cut off). Matches pipeline.py's segment_grid default.",
     )
     args = parser.parse_args()
 
@@ -152,4 +180,7 @@ if __name__ == "__main__":
         print(f"No such file: {args.image}")
         sys.exit(1)
 
-    run(args.image, psm=args.psm, threshold_method=args.threshold_method, margin_pct=args.margin)
+    run(
+        args.image, psm=args.psm, threshold_method=args.threshold_method,
+        margin_pct=args.margin, corners_arg=args.corners,
+    )
