@@ -4,9 +4,13 @@ here on purpose — this module gets imported both by the running API
 (bingo_scan.py) and by the standalone debug_scan.py CLI tool.
 """
 
+import logging
+
 import cv2
 import numpy as np
 import pytesseract
+
+logger = logging.getLogger(__name__)
 
 GRID_SIZE = 5
 WARPED_SIDE = 500  # pixel size of the flattened square card image
@@ -148,7 +152,9 @@ def _find_header_bands(warped: np.ndarray, min_band_height_frac: float = 0.03) -
     return runs
 
 
-def find_card_grid_regions(warped: np.ndarray, min_band_height_frac: float = 0.03) -> list[tuple[int, int]]:
+def find_card_grid_regions(
+    warped: np.ndarray, min_band_height_frac: float = 0.03, min_region_height_frac: float = 0.08
+) -> list[tuple[int, int]]:
     """
     Locate the 5x5 number-grid portion of each card on a (possibly
     multi-card) warped strip. Each detected header band marks where a
@@ -160,27 +166,67 @@ def find_card_grid_regions(warped: np.ndarray, min_band_height_frac: float = 0.0
     header band is detected at all (e.g. an already-cropped single-card
     photo with no colored header), the whole image is returned as a
     single region, matching the old single-card behavior.
+
+    Regions shorter than min_region_height_frac of the total warped
+    height are discarded as implausible — a real card's grid should
+    occupy a substantial portion of the strip; a region only a few
+    pixels tall means a header got detected somewhere it shouldn't have
+    (e.g. a shadow or background sliver mistaken for a colored band).
     """
     header_runs = _find_header_bands(warped, min_band_height_frac)
     height = warped.shape[0]
+    min_region_height = height * min_region_height_frac
 
     if not header_runs:
         return [(0, height)]
 
-    regions = []
+    # Regions strictly following a detected header — these are trusted
+    # completely, same as before.
+    trailing_regions = []
     for i, (h_start, h_end) in enumerate(header_runs):
         grid_top = h_end
         grid_bottom = header_runs[i + 1][0] if i + 1 < len(header_runs) else height
-        if grid_bottom > grid_top:
-            regions.append((grid_top, grid_bottom))
-        # else: degenerate region (e.g. two header bands detected right
-        # next to each other, or a header detected right at the image's
-        # bottom edge) — discard rather than returning an empty crop.
+        if grid_bottom - grid_top >= min_region_height:
+            trailing_regions.append((grid_top, grid_bottom))
+        # else: implausibly thin region (e.g. a header detected right
+        # next to another, or right at the image's bottom edge) —
+        # discard rather than returning a nonsensical sliver.
+
+    regions = list(trailing_regions)
+
+    # Content BEFORE the very first detected header — previously always
+    # silently discarded, even when it was a real card's worth of rows
+    # (e.g. the crop started mid-card, with that card's own header just
+    # off-frame above). Only include it if it's close in height to the
+    # other detected cards on this strip: segment_grid always divides a
+    # region into exactly GRID_SIZE rows, so feeding it a genuinely
+    # incomplete card (fewer real rows than that) would corrupt every
+    # row, not just the missing one — worse than just skipping it. With
+    # no other regions to compare against, fall back to the general
+    # min_region_height_frac threshold.
+    leading_height = header_runs[0][0]
+    if trailing_regions:
+        typical_height = sum(b - a for a, b in trailing_regions) / len(trailing_regions)
+        looks_complete = leading_height >= typical_height * 0.85
+    else:
+        typical_height = None
+        looks_complete = leading_height >= min_region_height
+
+    if looks_complete:
+        regions.insert(0, (0, leading_height))
+    elif leading_height >= min_region_height:
+        logger.warning(
+            f"find_card_grid_regions: {leading_height}px of content before the "
+            f"first detected header looks like an incomplete card (other cards "
+            f"on this strip are ~{typical_height:.0f}px) — skipped rather than "
+            f"guessed at. If this strip really has another card above what was "
+            f"captured, the crop/corners likely need to start higher."
+        )
 
     if not regions:
-        # Every candidate region was degenerate — fall back to treating
+        # Every candidate region was implausible — fall back to treating
         # the whole image as one card, same as the "no header detected"
-        # case above, rather than returning nothing at all.
+        # case above, rather than returning nothing useful at all.
         return [(0, height)]
     return regions
 
@@ -323,6 +369,18 @@ def _cell_boundaries(detected: list[int], total: int, tol_frac: float = 0.4) -> 
     matters when two candidates both fall within tolerance: the one
     numerically closer to an independent guess isn't necessarily the
     one that keeps consistent spacing with what's already been chosen.
+
+    NOTE: an earlier version of this function also tried snapping the
+    two OUTER boundaries (0/total) to a nearby detected line, on the
+    theory that hand-picked corners often leave slack between the crop
+    edge and the card's real border. Tested against ground truth, that
+    regressed accuracy (76% -> 71%, row 4 specifically got worse) —
+    most likely because trim_grid_bottom's cut is a density-based
+    heuristic, not necessarily anywhere near an actual printed line, so
+    snapping "the nearest detected line" at the bottom often grabbed
+    what was really the row 3/4 divider, corrupting row 4's crop rather
+    than fixing it. Reverted. The row 0/row 4 edge-effect seen in real
+    hall photos is real, but this wasn't the right fix for it.
     """
     equal_step = total / GRID_SIZE
     tol = equal_step * tol_frac
