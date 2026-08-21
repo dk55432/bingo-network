@@ -32,12 +32,15 @@ def load_dataset(directory):
 
 
 def main():
+
     print("Loading training dataset...")
+
     X_train, y_train, train_filenames = load_dataset(
         DATASET_DIR / "train"
     )
 
     print("Loading test dataset...")
+
     X_test, y_test, test_filenames = load_dataset(
         DATASET_DIR / "test"
     )
@@ -45,43 +48,98 @@ def main():
     print()
     print("Dataset summary")
     print("----------------")
-    print(f"Training images: {len(X_train)}")
-    print(f"Test images:     {len(X_test)}")
+    print(f"Training images:  {len(X_train)}")
+    print(f"Test images:      {len(X_test)}")
     print(f"Pixels per image: {X_train.shape[1]}")
 
     # Create and train the classifier.
-    classifier = KNeighborsClassifier(n_neighbors=3)
-    classifier.fit(X_train, y_train)
+    classifier = KNeighborsClassifier(
+        n_neighbors=7
+    )
+
+    classifier.fit(
+        X_train,
+        y_train
+    )
 
     # Predictions for the test images.
     predictions = classifier.predict(X_test)
+    
+    # Probability estimates for the test images.
+    probabilities = classifier.predict_proba(X_test)
+    
+    # Confidence is the probability assigned to
+    # the digit that the classifier predicted.
+    vote_confidence = np.max(
+        probabilities,
+        axis=1
+    )
 
+    # for index in range(len(X_test)):
+
+    #     print(
+    #         f"Image {index:2d}: "
+    #         f"actual={y_test[index]} "
+    #         f"predicted={predictions[index]} "
+    #         f"confidence={vote_confidence[index]:.1%}"
+    #     )
+    
     # Calculate accuracy.
-    correct = np.sum(predictions == y_test)
+    correct = np.sum(
+        predictions == y_test
+    )
+
     total = len(y_test)
 
     print()
     print("Results")
     print("-------")
     print(f"Correct: {correct} / {total}")
-    print(f"Test accuracy: {correct / total:.1%}")
+    print(
+        f"Test accuracy: "
+        f"{correct / total:.1%}"
+    )
 
     # Find the incorrectly classified images.
-    wrong_indices = np.where(predictions != y_test)[0]
+    wrong_indices = np.where(
+        predictions != y_test
+    )[0]
+    
+    # Calculate a confidence-like score for every test image.
+    #
+    # For each test image, examine ALL training images and
+    # find the closest example of each digit.
+
+    confidence_values = []
 
     print()
-    print(f"Incorrect predictions: {len(wrong_indices)}")
+    print("## Per-image confidence")
 
-    for index in wrong_indices:
+    for index in range(len(X_test)):
+
+        predicted_digit = predictions[index]
+
+        # Find the probability assigned to the predicted digit.
+        predicted_class_index = np.where(
+            classifier.classes_ == predicted_digit
+        )[0][0]
+
+        confidence = probabilities[
+            index,
+            predicted_class_index
+        ]
+
         print(
-            f"Image {index}: "
-            f"actual={y_test[index]}, "
-            f"predicted={predictions[index]}, "
-            f"file={test_filenames[index]}"
+            f"Image {index:2d}: "
+            f"actual={y_test[index]} "
+            f"predicted={predicted_digit} "
+            f"confidence={confidence:.1%}"
         )
+    
+    # -------------------------------------------------
+    # Display nearest neighbors for incorrect results.
+    # -------------------------------------------------
 
-    # Find and display the three nearest training examples
-    # for each incorrectly classified test image.
     if len(wrong_indices) > 0:
 
         for index in wrong_indices:
@@ -89,11 +147,15 @@ def main():
             distances, neighbor_indices = (
                 classifier.kneighbors(
                     X_test[index].reshape(1, -1),
-                    n_neighbors=3
+                    n_neighbors=7
                 )
             )
 
-            fig, axes = plt.subplots(1, 4, figsize=(10, 3))
+            fig, axes = plt.subplots(
+                1,
+                8,
+                figsize=(16, 3)
+            )
 
             axes[0].imshow(
                 X_test[index].reshape(28, 28),
@@ -108,19 +170,30 @@ def main():
 
             axes[0].axis("off")
 
-            for position, (distance, neighbor_index) in enumerate(
-                zip(distances[0], neighbor_indices[0]),
+            for position, (
+                distance,
+                neighbor_index
+            ) in enumerate(
+                zip(
+                    distances[0],
+                    neighbor_indices[0]
+                ),
                 start=1
             ):
+
                 axes[position].imshow(
-                    X_train[neighbor_index].reshape(28, 28),
+                    X_train[
+                        neighbor_index
+                    ].reshape(28, 28),
                     cmap="gray"
                 )
 
                 axes[position].set_title(
                     f"TRAIN\n"
-                    f"Label: {y_train[neighbor_index]}\n"
-                    f"Distance: {distance:.0f}"
+                    f"Label: "
+                    f"{y_train[neighbor_index]}\n"
+                    f"Distance: "
+                    f"{distance:.0f}"
                 )
 
                 axes[position].axis("off")
@@ -131,6 +204,7 @@ def main():
 
             plt.tight_layout()
             plt.show()
-            
+
+
 if __name__ == "__main__":
     main()
