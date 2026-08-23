@@ -927,6 +927,16 @@ def extract_grid_cells(warped, rows=5, columns=5):
                 pos = first_clean(band, max(xp, lo), min(hi + 1, xp + reach))
                 if pos is not None and not (lo <= pos <= hi):
                     pos = None
+                if pos is None:
+                    # No fully clear corridor within reach (dense digits,
+                    # or keystone drift larger than the reach): settle for
+                    # the least-ink spot so the cut grazes as few digits
+                    # as possible instead of standing mid-ink.
+                    a = max(lo, int(xp - reach))
+                    b = min(hi + 1, int(xp + reach) + 1)
+                    if b - a > 10:
+                        sm = np.convolve(band[a:b], np.ones(5) / 5, "same")
+                        pos = a + int(np.argmin(sm))
             if pos is None:
                 # Either already clean (keep the fitted position — it
                 # tracks the printed grid) or no clean corridor within
@@ -1081,6 +1091,17 @@ def find_card_components(image):
     locmed = cv2.medianBlur(gray, 51).astype(np.int16)
     print_m = (gray.astype(np.int16) < locmed - 35).astype(np.uint8) * 255
 
+    # Pink mask: the saturated BINGO header colour. The header letters
+    # are pink on pink — nearly invisible in grayscale — so the print
+    # mask reads every header as a low-ink band and the projection
+    # splitter mistakes it for a gutter, right where stacked cards
+    # touch. The row projection below is therefore patched at
+    # header-like pink bands (rows where pink is dense across the
+    # piece); scattered pink elsewhere stays out of the way.
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    pink_m = (((hsv[:, :, 0] < 18) | (hsv[:, :, 0] > 162)) &
+              (hsv[:, :, 1] > 45) & (hsv[:, :, 2] > 140)).astype(np.uint8) * 255
+
     def smooth1d(v, k):
         ker = np.ones(k, np.float32) / k
         return np.convolve(v.astype(np.float32), ker, mode="same")
@@ -1110,6 +1131,16 @@ def find_card_components(image):
         pm = np.where(mm, print_m[y:y + bh, x:x + bw], 0)
         colp = smooth1d(pm.sum(axis=0) / 255, max(5, w // 150))
         rowp = smooth1d(pm.sum(axis=1) / 255, max(5, w // 150))
+        # Header bands of stacked cards read as gutters in rowp (pink
+        # letters vanish from the print mask); raise those rows to the
+        # profile's interquartile level so only true gutters stay low.
+        pk = np.where(mm, pink_m[y:y + bh, x:x + bw], 0)
+        pink_rows = smooth1d(pk.sum(axis=1) / 255.0, max(5, w // 150))
+        band_rows = pink_rows > 0.15 * bw
+        if band_rows.any():
+            fill = float(np.percentile(rowp[~band_rows], 75)) \
+                if (~band_rows).any() else float(rowp.max())
+            rowp = np.where(band_rows, fill, rowp)
         min_gap = max(12, w // 100)
         ccols = cuts_1d(colp, min_gap)
         crows = cuts_1d(rowp, min_gap)
@@ -1134,6 +1165,96 @@ def find_card_components(image):
         if area < 0.005 * w * h:
             continue
         recurse(x, y, bw, bh, i, 0)
+
+    # Stacked cards hide from the projection splitter: printed sheets
+    # put consecutive rows of cards nearly in contact, so the seam has
+    # no deep print valley — while inside a single card the gaps
+    # between number rows do. The BINGO headers rescue this: every card
+    # starts with a saturated pink band, so a leaf holding several
+    # well-separated pink bands is several vertically stacked cards,
+    # with each band marking a card's top edge. Photos without colour
+    # headers have no pink at all and pass through untouched.
+
+    def split_pink(leaf):
+        x, y, bw, bh, lid = leaf
+        rs = pink_m[y:y + bh, x:x + bw].sum(axis=1).astype(np.float32)
+        k = max(15, bw // 100) | 1
+        rs = np.convolve(rs, np.ones(k) / k, "same")
+        if rs.max() < 40:
+            return [leaf]
+        hi = rs > max(0.30 * float(rs.max()), 40.0)
+        peaks, i = [], 1
+        while i < len(hi) - 1:
+            if hi[i]:
+                s = i
+                while i + 1 < len(hi) - 1 and hi[i + 1]:
+                    i += 1
+                seg = rs[s:i + 1]
+                peaks.append([s + int(seg.argmax()), float(seg.max())])
+            i += 1
+        # Pick card-start bands greedily from the strongest down: a
+        # genuine stacked neighbour sits one card-height from an
+        # accepted band, while pink digits inside the grid or the FREE
+        # square at a card's centre sit mid-card, roughly half a pitch
+        # from every header. Distance to the nearest accepted band lets
+        # long stacks chain link by link. Title strips above the first
+        # card fail the pitch test too, which simply leaves the crop
+        # starting there.
+        peaks = [(t, v) for t, v in peaks if t <= bh - max(150, int(0.12 * bh))]
+        if not peaks:
+            return [leaf]
+        merged = [max(peaks, key=lambda p_: p_[1])]
+        # A band rejected early can become acceptable once a nearer
+        # header joins, so iterate until no new band qualifies.
+        changed = True
+        while changed:
+            changed = False
+            for p in sorted(peaks, key=lambda p_: -p_[1]):
+                if p in merged:
+                    continue
+                d = min(abs(p[0] - a[0]) for a in merged)
+                if 650 <= d <= 1500:
+                    merged.append(p)
+                    changed = True
+        merged.sort(key=lambda p_: p_[0])
+        if len(merged) < 2:
+            return [leaf]
+        segs, prev = [], 0
+        for top, _ in merged:
+            b = max(0, top - 12)  # card begins at its header
+            if b - prev >= int(0.08 * h):
+                segs.append((prev, b))
+            prev = b
+        if bh - prev >= int(0.08 * h):
+            segs.append((prev, bh))
+        return [[x, y + a, bw, b - a, lid] for a, b in segs] or [leaf]
+
+    leaves = [piece for leaf in leaves for piece in split_pink(leaf)]
+
+    # Trim each leaf down to its content: blob bboxes routinely include
+    # stretches of bare table or neighbouring clutter, and a crop that
+    # opens on table makes downstream row fitting draw its grid over
+    # whatever is in the way. Rows/columns whose content (print or pink)
+    # is negligible next to the leaf's typical content row are cut away.
+    def trim_leaf(leaf):
+        x, y, bw, bh, lid = leaf
+        cont = np.where(blob_labels[y:y + bh, x:x + bw] == lid,
+                        np.where((print_m > 0) | (pink_m > 0),
+                                 np.uint8(255), np.uint8(0))[y:y + bh, x:x + bw],
+                        0)
+
+        def bounds(v):
+            nz = v[v > 0]
+            if not len(nz):
+                return 0, len(v) - 1
+            idx = np.nonzero(v >= 0.10 * np.median(nz))[0]
+            return int(idx[0]), int(idx[-1])
+
+        r0, r1 = bounds(cont.sum(axis=1) / 255.0)
+        c0, c1 = bounds(cont.sum(axis=0) / 255.0)
+        return [x + c0, y + r0, c1 - c0 + 1, r1 - r0 + 1, lid]
+
+    leaves = [trim_leaf(l) for l in leaves]
 
     # Validation: plausible card shape, enough print ink, and size
     # comparable to the other cards of this photo (cards in one shot

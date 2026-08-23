@@ -5,3 +5,4 @@ debug_output/
 output.txt
 .DS_Store
 node_modules/
+outputs/
