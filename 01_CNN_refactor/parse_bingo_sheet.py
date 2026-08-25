@@ -432,9 +432,48 @@ def _crop_to_number_grid(card):
     return roi, top, left
 
 
+RING_WEIGHT = 0.15     # ring-ink penalty weight in divider fitting
+PRIOR_INJECT = True    # inject prior-consistent full-span models when nothing matches
+PRIOR_MIN_STRENGTH = 0.30   # autocorr peak height (vs lag 0) to trust a prior
+PRIOR_MIN_DOMINANCE = 2.0   # peak vs best rival lag — kills harmonic aliases
+FIND_DEBUG = False     # print per-stage card-segmentation internals
+
+
+def _ac_prior(profile, lo_frac=0.10, hi_frac=0.26):
+    """
+    Autocorrelation pitch estimate for a 1-D ink profile.
+
+    Returns (lag, strength, dominance): the periodicity lag inside the
+    plausible-pitch window, its height relative to lag 0, and its ratio
+    against the strongest rival peak. A low dominance means the "pitch"
+    is one indistinguishable bump among many — digit harmonics, plank
+    grain, print noise — and must not be trusted as a hard constraint.
+    """
+    d = profile - profile.mean()
+    n = len(profile)
+    if n < 16:
+        return None, 0.0, 0.0
+    ac = np.correlate(d, d, mode="full")
+    ac = ac[n - 1:]
+    lo, hi = int(n * lo_frac), max(int(n * lo_frac) + 1, int(n * hi_frac))
+    if hi <= lo or ac[0] <= 0:
+        return None, 0.0, 0.0
+    win = ac[lo:hi]
+    pk = float(win.max())
+    strength = pk / float(ac[0])
+    if pk <= 0.05 * float(ac[0]):
+        return None, strength, 1.0
+    lag = int(np.argmax(win)) + lo
+    m = int(0.25 * (lag - lo))
+    mask = np.ones(len(win), bool)
+    mask[max(0, lag - lo - m):min(len(win), lag - lo + m + 1)] = False
+    alt = float(win[mask].max()) if mask.any() else 0.0
+    return float(lag), strength, (pk / alt if alt > 0 else 99.0)
+
 
 def _fit_regular_rows(candidates, h, rows, min_span_frac=0.45, max_span_frac=1.02,
-                      miss_penalty=0.35, prior_pitch=None):
+                      miss_penalty=0.35, prior_pitch=None, prior_conf=None,
+                      ring_profile=None):
     """
     Choose `rows + 1` row boundaries from candidate divider positions by
     fitting an evenly-spaced model, tolerating missing dividers.
@@ -498,13 +537,27 @@ def _fit_regular_rows(candidates, h, rows, min_span_frac=0.45, max_span_frac=1.0
                         continue
                     models.append((step, ci, cj, a, b))
 
-    # Pair anchors clustered in one corner of the axis cannot produce a
-    # plausible grid span at all — every pair model is rejected and the
-    # fit would fail even though a pitched model through any single
-    # anchor is perfectly viable. Fall back to single-anchor hypotheses.
-    if not models and prior_pitch:
-        for c in candidates:
-            models.extend(single_anchor_models(c[0]))
+    # No model agrees with the digit-pitch prior — either nothing fit
+    # the crop-sized span box at all, or only aliased steps survived
+    # (e.g. a card whose full span overflows the crop because a
+    # physically overlapping neighbour or a shy mask hides part of it).
+    # Trust the prior: add full-span models whose step matches it even
+    # though their far boundary lies outside the image. The caller
+    # clips such positions and the downstream quality gates judge what
+    # remains — far better than letting an aliased half-pitch model win.
+    if PRIOR_INJECT and prior_pitch and prior_conf \
+            and prior_conf[0] >= PRIOR_MIN_STRENGTH \
+            and prior_conf[1] >= PRIOR_MIN_DOMINANCE \
+            and not any(abs(m[0] - prior_pitch) <= 0.16 * prior_pitch
+                        for m in models):
+        hi_span = 1.60 * h
+        for cand in candidates:
+            for a in range(n):
+                top = cand[0] - a * prior_pitch
+                bottom = top + (n - 1) * prior_pitch
+                if min_span_frac * h <= bottom - top <= hi_span \
+                        and -0.02 * h <= top <= h and bottom <= hi_span:
+                    models.append((float(prior_pitch), cand[0], cand[0], a, a))
 
     # The pitch prior disambiguates aliasing (several index assignments
     # explain the same sparse lines at different steps). A tight window
@@ -551,6 +604,33 @@ def _fit_regular_rows(candidates, h, rows, min_span_frac=0.45, max_span_frac=1.0
 
         if not all(positions[k] < positions[k + 1] for k in range(n - 1)):
             continue
+        # A regular fit can alias to half the true pitch, landing every
+        # other boundary mid-digit. Real dividers sit in whitespace
+        # gutters: ink in a ring around a boundary (excluding the line
+        # itself) means that boundary slices through digit rows. Such
+        # models lose against clean-gutter competitors even when they
+        # harvest more line candidates.
+        if ring_profile is not None:
+            mu = float(ring_profile.mean())
+            sd = float(ring_profile.std()) or 1.0
+            inner = max(2, int(0.05 * step))
+            # Clear the divider's own ink: printed lines run several rows
+            # thick, and a narrow exclusion band would score the line's
+            # shoulders against the model sitting on it.
+            thick = [c[2] for c in candidates if len(c) > 2]
+            if thick:
+                inner = max(inner, int(round(0.75 * float(np.median(thick)))))
+            outer = max(6, int(0.16 * step))
+            for k in range(1, n - 1):
+                p = int(round(positions[k]))
+                lo_ = max(0, p - outer)
+                hi_ = min(len(ring_profile), p + outer + 1)
+                seg = np.concatenate([
+                    ring_profile[lo_:max(lo_, p - inner)],
+                    ring_profile[min(hi_, p + inner + 1):hi_],
+                ])
+                if len(seg):
+                    score -= RING_WEIGHT * max((float(seg.mean()) - mu) / sd, 0.0)
         score /= n
         if best is None or score > best[0]:
             best = (score, positions, step)
@@ -634,14 +714,7 @@ def _fit_vertical_dividers(gray, y0, y1, w, columns):
     ink = vb.mean(axis=0).astype(np.float32) / 255.0
     sm = np.convolve(ink, np.ones(9) / 9, mode="same")
 
-    ac = np.correlate(sm - sm.mean(), sm - sm.mean(), mode="full")
-    ac = ac[len(sm) - 1:]
-    lo, hi = int(w * 0.08), max(int(w * 0.08) + 1, int(w * 0.30))
-    pitch = None
-    if hi > lo and ac[0] > 0:
-        window = ac[lo:hi]
-        if float(window.max()) > 0.05 * float(ac[0]):
-            pitch = float(np.argmax(window) + lo)
+    pitch, prior_strength, prior_dom = _ac_prior(sm, 0.08, 0.30)
 
     # --- Printed-line candidates ------------------------------------------
     raw = []
@@ -666,15 +739,16 @@ def _fit_vertical_dividers(gray, y0, y1, w, columns):
                 too_thick = (x - run_start + 1) > max_run
                 if not touches_edge and not too_thick:
                     peak_x = run_start + int(np.argmax(vprof[run_start:x + 1]))
-                    raw.append((peak_x, float(vprof[peak_x])))
+                    raw.append((peak_x, float(vprof[peak_x]),
+                                x - run_start + 1))
             x += 1
 
     # Merge hits from both scales (positions differ by a few px).
     raw.sort(key=lambda c: -c[1])
     lines = []
-    for px, cov in raw:
-        if all(abs(px - lx) > max(15, int(0.06 * w)) for lx, _ in lines):
-            lines.append((px, cov))
+    for px, cov, th in raw:
+        if all(abs(px - lx) > max(15, int(0.06 * w)) for lx, _, _ in lines):
+            lines.append((px, cov, th))
     lines.sort()
 
     # --- Gutter-dip candidates (weak) --------------------------------------
@@ -705,11 +779,14 @@ def _fit_vertical_dividers(gray, y0, y1, w, columns):
         dips.sort()
     dip_strength = 0.12
 
-    candidates = [(int(px), cov) for px, cov in lines]
-    candidates += [(int(dx), dip_strength) for dx, _ in dips]
+    candidates = [(int(px), cov, th) for px, cov, th in lines]
+    # Gutter dips are valleys, not printed strokes: nominal thin.
+    candidates += [(int(dx), dip_strength, 3) for dx, _ in dips]
     candidates.sort()
 
-    positions = _fit_regular_rows(candidates, w, columns, prior_pitch=pitch)
+    positions = _fit_regular_rows(candidates, w, columns, prior_pitch=pitch,
+                                  prior_conf=(prior_strength, prior_dom),
+                                  ring_profile=sm)
     if positions is None:
         return None
 
@@ -717,7 +794,467 @@ def _fit_vertical_dividers(gray, y0, y1, w, columns):
     return [int(np.clip(x, 0, w - 1)) for x in positions]
 
 
-def extract_grid_cells(warped, rows=5, columns=5):
+def _deskew_header(card):
+    """
+    Straighten a card whose header strip is visibly tilted inside an
+    axis-aligned leaf crop. A line fitted through the saturated
+    header's per-column centroids gives the residual angle the
+    sheet-level warp leaves behind; rotating by it is what lets the
+    header anchor place rows that stop slicing into digit bands
+    (IMG_4903's sheet sits rotated counter-clockwise inside its leaf).
+    Returns the card unchanged when there is no header or no usable
+    tilt.
+    """
+    hdr = _find_header_band(card)
+    if hdr is None:
+        return card
+    x0, x1, y0, y1 = hdr
+    hsv = cv2.cvtColor(card, cv2.COLOR_BGR2HSV)
+    sat = ((hsv[:, :, 1] > 60) & (hsv[:, :, 2] > 100)).astype(np.uint8)
+    win = sat[max(0, y0 - 10):min(y1 + 10, card.shape[0]), x0:x1 + 1]
+    wsum = win.sum(axis=0).astype(np.float32)
+    good = wsum >= 3
+    if int(good.sum()) < 30:
+        return card
+    xs = np.nonzero(good)[0].astype(np.float32)
+    cy = (win * np.arange(win.shape[0])[:, None]).sum(axis=0)[good] \
+        / wsum[good]
+    slope, _ = np.polyfit(xs, cy, 1)
+    ang = float(np.degrees(np.arctan(slope)))
+    if abs(ang) < 0.4 or abs(ang) > 10:
+        return card
+    h, w = card.shape[:2]
+    mat = cv2.getRotationMatrix2D((w / 2, h / 2), ang, 1.0)
+    return cv2.warpAffine(card, mat, (w, h), flags=cv2.INTER_LINEAR,
+                          borderMode=cv2.BORDER_CONSTANT,
+                          borderValue=(255, 255, 255))
+
+
+def _find_header_band(warped):
+    """
+    Locate the B I N G O header strip of a card crop.
+
+    Every card opens with a full-width header band — same letters, same
+    size, only the background colour changes — which makes it a far more
+    reliable anchor than the grid's faint printed lines. Detection is
+    colour-generic: a horizontal strip near the crop top whose pixels
+    are mostly saturated (any hue), spanning a contiguous run of at
+    least a third of the crop width.
+
+    Returns (x0, x1, y0, y1), or None when no header-like band exists.
+    """
+    h, w = warped.shape[:2]
+    hsv = cv2.cvtColor(warped, cv2.COLOR_BGR2HSV)
+    sat = ((hsv[:, :, 1] > 60) & (hsv[:, :, 2] > 100)).astype(np.uint8)
+    kk = max(3, h // 60)
+    rows = np.convolve(sat.sum(axis=1).astype(np.float32) / w,
+                       np.ones(kk) / kk, "same")
+    hi = rows > 0.45
+    min_h = max(5, int(0.025 * h))
+    max_h = int(0.22 * h)
+    y = 1
+    while y < len(hi) - 1:
+        if hi[y]:
+            s = y
+            while y + 1 < len(hi) - 1 and hi[y + 1]:
+                y += 1
+            if s > 0.40 * h:
+                break  # headers live at the crop top; later bands are
+                       # coloured squares inside the grid (e.g. FREE)
+            if min_h <= y - s + 1 <= max_h:
+                seg = sat[s:y + 1, :]
+                cols = np.convolve(
+                    seg.sum(axis=0).astype(np.float32) / (y - s + 1),
+                    np.ones(9) / 9, "same")
+                xs = np.nonzero(cols > 0.45)[0]
+                if len(xs):
+                    # Merge across pale letters: one faded glyph must
+                    # not truncate the span (it sets the grid pitch).
+                    gap_tol = max(25, int(0.06 * w))
+                    runs, st = [], int(xs[0])
+                    for a, b in zip(xs, xs[1:]):
+                        if b - a > gap_tol:
+                            runs.append((st, int(a)))
+                            st = int(b)
+                    runs.append((st, int(xs[-1])))
+                    x0, x1 = max(runs, key=lambda r: r[1] - r[0])
+                    if x1 - x0 >= 0.35 * w:
+                        return x0, x1, s, y
+        y += 1
+    return None
+
+
+def _anchor_grid_from_header(card_shape, hdr, row_ink,
+                             prior_pitch=None, prior_conf=None):
+    """
+    Derive the six row boundaries of a card's number grid from its
+    header band. The header spans the card's full width and sits flush
+    above the grid, so its width predicts the row pitch: across the
+    corpus the grid measures ~0.84 of the header width in height, i.e.
+    five rows of ~0.168 header widths each. Expected boundaries are
+    snapped to the nearest whitespace valley of the row-ink profile so
+    cuts stay out of printed lines and digits.
+
+    Returns 6 y positions, or None when the geometry cannot fit.
+    """
+    h = card_shape[0]
+    x0, x1, _, hy1 = hdr
+    hdr_w = x1 - x0
+    top = hy1
+
+    # Whitespace level: valleys between digit bands sit well below the
+    # ink inside them. Snap each expected boundary to the CENTRE of the
+    # low-ink run nearest it — centres are stable, argmin drifts around
+    # flat valleys and inflates the regularity metric.
+    quiet = 0.35 * float(np.median(row_ink[row_ink > 0])) if (row_ink > 0).any() \
+        else 0.35 * float(row_ink.max())
+    kk = max(3, int(0.04 * max(24.0, 0.168 * hdr_w))) | 1
+    sm_ink = np.convolve(row_ink, np.ones(kk) / kk, mode="same")
+    low = row_ink <= max(quiet, 1e-6)
+    runs = []
+    y = 0
+    n = len(low)
+    while y < n:
+        if low[y]:
+            s = y
+            while y + 1 < n and low[y + 1]:
+                y += 1
+            runs.append((s, y))
+        y += 1
+
+    def snap(expected, pitch):
+        best, best_d = None, None
+        for s, e in runs:
+            c = 0.5 * (s + e)
+            d = abs(c - expected)
+            if d <= 0.18 * pitch and (best_d is None or d < best_d):
+                best, best_d = c, d
+        return (expected if best is None else best), (best_d is None)
+
+    # Candidate pitches, tried best-scored first:
+    #   geom — width rule (~0.168 header widths per row); right for
+    #          square-ish cells but too tall whenever pale letters
+    #          shrink the measured span or cells are wide-format.
+    #   cal  — the candidate refined onto the deepest whitespace valley
+    #          near its own first row gap (ground truth for one step).
+    #   squeeze — five rows divided into whatever space the crop offers
+    #          below the header; rescues perspective-shrunk cards whose
+    #          true grid simply cannot fit the width rule (IMG_4903
+    #          card 1). Only kept when its valleys check out.
+    p_geom = float(np.clip(0.168 * hdr_w, 24, h))
+    if prior_pitch and prior_conf \
+            and prior_conf[0] >= PRIOR_MIN_STRENGTH \
+            and prior_conf[1] >= PRIOR_MIN_DOMINANCE \
+            and abs(prior_pitch - p_geom) <= 0.18 * p_geom:
+        p_geom = float(prior_pitch)
+
+    def calibrate(p0):
+        lo_, hi_ = int(top + 0.55 * p0), min(len(sm_ink) - 1,
+                                             int(top + 1.45 * p0))
+        if hi_ - lo_ < 8:
+            return None
+        v = lo_ + int(np.argmin(sm_ink[lo_:hi_ + 1]))
+        p_new = float(v - top)
+        ref = float(np.percentile(sm_ink[max(0, int(top)):hi_ + 1], 20))
+        if 0.72 * p0 <= p_new <= 1.35 * p0 \
+                and sm_ink[v] <= 1.3 * max(ref, 1e-6):
+            return p_new
+        return None
+
+    cands = [p_geom]
+    for base in (p_geom,
+                 (h - 4 - top) / 5.0 * 0.96):
+        pc = calibrate(base)
+        if pc is not None and all(abs(pc - c) > 0.06 * c for c in cands):
+            cands.append(pc)
+    squeeze = (h - 4 - top) / 5.0 * 0.96
+    if squeeze < 0.99 * p_geom:
+        cands.append(squeeze)
+
+    best = None
+    for pitch in sorted(set(round(c, 1) for c in cands), reverse=True):
+        positions = [float(top)]
+        overflow = False
+        score = 0.0
+        for k in range(1, 6):
+            expected = top + k * pitch
+            if expected >= h + 0.10 * pitch:
+                overflow = True  # grid runs past the crop: wrong pitch
+                break
+            pos, missed = snap(expected, pitch)
+            if pos <= positions[-1]:
+                pos = positions[-1] + max(4.0, 0.25 * pitch)
+            vi = min(n - 1, max(0, int(pos)))
+            depth = float(sm_ink[vi]) / max(
+                float(np.percentile(sm_ink[max(0, int(top)):n], 50)), 1e-6)
+            score += (3.0 if missed else min(abs(pos - expected), 1.5 *
+                                             0.18 * pitch) /
+                      (0.18 * pitch)) + depth
+            positions.append(pos)
+        if overflow:
+            continue
+        score /= 5.0
+        if best is None or score < best[0]:
+            best = (score, positions)
+    if best is None:
+        return None
+    positions = best[1]
+    if positions[-1] > h + 0.05 * p_geom:
+        positions[-1] = float(h - 1)
+    return [int(round(p)) for p in positions]
+
+
+def _band_letter_census(binary, y0, y1):
+    """
+    Count components in a row band, split into total vs 'big' ones
+    (taller than 55% of the band). Digit rows carry many tall glyphs;
+    a B I N G O letter strip carries only a few wide flat ones.
+    """
+    # Degenerate bands (boundaries collapsed by aggressive snapping)
+    # must not reach connectedComponentsWithStats — an empty image
+    # segfaults it.
+    h = binary.shape[0]
+    a, b = max(0, int(y0)), min(h, max(int(y1), int(y0) + 1))
+    if b <= a:
+        return 0, 0
+    band = np.ascontiguousarray(binary[a:b])
+    n, _, stats, _ = cv2.connectedComponentsWithStats(band, connectivity=8)
+    bh = max(1, b - a)
+    comps = [(stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT])
+             for i in range(1, n) if stats[i, cv2.CC_STAT_AREA] >= 30]
+    big = sum(1 for _, ch in comps if ch > 0.55 * bh)
+    return len(comps), big
+
+
+def _fit_column_lattice(gray, hdr, columns, y_lines):
+    """
+    Fit the vertical divider lattice to CONTENT rather than assuming the
+    number grid spans exactly the header strip's width. The header can
+    overhang the grid (title letters, FREE-square column, perspective),
+    and a blind linspace(hdr_x0, hdr_x1) then drifts every interior cut
+    into the neighbouring cell, splitting two-digit numbers
+    (IMG_4903 card 2: true pitch varies 190-271 px while linspace
+    assumed a constant 247).
+
+    Grid search around the header-implied model: pitch in [0.78,
+    1.15]x(hdr_w/columns), start shifted within about a fifth of a
+    pitch. Scored by print-mask ink AT the interior cut positions
+    (lower = cuts run through whitespace gutters). Marked/daubed cards
+    smear ink across gutters, so the profile averages only the least-
+    marked grid rows. Returns None when no candidate meaningfully beats
+    the header-implied span, letting callers fall back to it.
+    """
+    h_, w_ = gray.shape[:2]
+    lm = cv2.medianBlur(gray, 51).astype(np.int16)
+    pmc = gray.astype(np.int16) < lm - 35
+
+    # Per-row profiles; keep the cleanest half so daubs and stray
+    # handwriting cannot dictate the lattice.
+    row_profs = []
+    for r in range(len(y_lines) - 1):
+        a = int(np.clip(y_lines[r] + (y_lines[r + 1] - y_lines[r]) // 6,
+                        0, h_))
+        b = int(np.clip(y_lines[r + 1] - (y_lines[r + 1] - y_lines[r]) // 6,
+                        0, h_))
+        if b - a < 12:
+            continue
+        pr = pmc[a:b, :].mean(axis=0)
+        row_profs.append((float(pr.mean()), pr))
+    if not row_profs:
+        return None
+    row_profs.sort(key=lambda t_: t_[0])
+    keep = max(1, len(row_profs) // 2)
+    kept = [p_ for _, p_ in row_profs[:keep]]
+    prof = np.mean(kept, axis=0)
+    smo = np.convolve(prof, np.ones(9) / 9, mode="same")
+
+    # Cross-row gutter support: a TRUE cell boundary is blank in every
+    # clean row, while the gap between the two digits of a number is
+    # blank only in rows whose numbers happen to leave space there.
+    # Ink-at-cut alone cannot tell the two apart (both are whitespace),
+    # which is exactly how cuts ended up slicing 2-digit numbers in
+    # half. A candidate position is valid only when most clean rows
+    # agree it is clear.
+    row_smos = [np.convolve(p_, np.ones(7) / 7, mode="same") for p_ in kept]
+    thresh = [max(0.05, float(np.percentile(rs, 25))) for rs in row_smos]
+
+    def support(x, win=0):
+        xi = int(np.clip(x, 0, w_ - 1))
+        lo = max(0, xi - win)
+        hi = min(w_ - 1, xi + win)
+        ok = sum(1 for rs, th in zip(row_smos, thresh)
+                 if float(rs[lo:hi + 1].min()) <= th + 0.01)
+        return ok / len(row_smos)
+
+    # ----- Number-start periodicity anchored search -------------------------
+    # The header strip can be unreadable on damaged crops (pink cut
+    # residue, torn edge), and then hdr anchors the whole lattice to the
+    # wrong span: a phantom left-edge column appears, every cut lands
+    # between digit pairs, and column 5 falls off the right side
+    # (IMG_4949 cards 2/4/5/6). Numbers are laid out on a strict pitch,
+    # so the STARTS of digit blobs are periodic modulo the true column
+    # pitch even when individual rows are smeared by handwriting or
+    # daubs. Suppress the printed rules (they glue a whole row into one
+    # component), collect digit-blob starts, find the pitch that
+    # maximises their wrapped circular concentration, then refine phase
+    # and pitch by minimising ink overlap between candidate cuts and
+    # blobs.
+    hk = cv2.getStructuringElement(cv2.MORPH_RECT,
+                                   (max(30, w_ // 5), 1))
+    rule = cv2.dilate(cv2.morphologyEx(pmc.astype(np.uint8),
+                                       cv2.MORPH_OPEN, hk),
+                      cv2.getStructuringElement(cv2.MORPH_RECT, (1, 9)))
+    clean = pmc.astype(np.uint8) & ~rule
+    ivs = []
+    for r in range(len(y_lines) - 1):
+        a = int(np.clip(y_lines[r] + (y_lines[r + 1] - y_lines[r]) // 6,
+                        0, h_))
+        b = int(np.clip(y_lines[r + 1] - (y_lines[r + 1] - y_lines[r]) // 6,
+                        0, h_))
+        if b - a < 12:
+            continue
+        nl, _, stats, _ = cv2.connectedComponentsWithStats(clean[a:b, :], 8)
+        for sx, sy, sw, sh, ar in stats[1:]:
+            if (ar >= 20 and sh >= max(9, 0.30 * (b - a))
+                    and sw >= 13 and sw < int(0.30 * w_)):
+                ivs.append((int(sx), int(sx + sw)))
+    peaks = []
+    if len(ivs) >= columns * 3:
+        starts = np.array([s for s, _ in ivs], float)
+        wts = np.array([e - s for s, e in ivs], float)
+        raw = []
+        for p in np.arange(110.0, min(260.0, w_ / 3), 0.5):
+            r_ = abs((np.exp(2j * np.pi * starts / p) * wts).mean())
+            raw.append((float(r_), float(p)))
+        raw.sort(reverse=True)
+        for r_, p in raw:
+            if all(abs(p - q) > 6 for q, _ in peaks):
+                peaks.append((r_, p))
+            if len(peaks) >= 3:
+                break
+
+        span_lo = min(s for s, _ in ivs)
+        span_hi = max(e for _, e in ivs)
+
+        def pen(b0, p, tol=7):
+            tot = 0.0
+            for s, e in ivs:
+                for k in range(1, columns):
+                    x = b0 + k * p
+                    ov = min(e, x + tol) - max(float(s), x - tol)
+                    if ov > 0:
+                        tot += ov
+            edge = 0.18 * p
+            for k in range(columns + 1):
+                x = b0 + k * p
+                if x < span_lo - edge:
+                    tot += 3 * (span_lo - edge - x)
+                if x > span_hi + edge:
+                    tot += 3 * (x - span_hi - edge)
+            return tot
+
+        best = None
+        for _, p_pk in peaks:
+            ang = np.exp(2j * np.pi * starts / p_pk)
+            phi = float(np.angle((ang * wts).mean())) * p_pk / (2 * np.pi)
+            phi %= p_pk
+            inset = float(np.median((starts - phi) % p_pk))
+            b00 = phi - inset
+            for p in np.arange(p_pk - 4, p_pk + 4.01, 0.25):
+                for db in np.arange(-40, 40.01, 1.0):
+                    v = pen(b00 + db, p)
+                    if best is None or v < best[0]:
+                        best = (v, b00 + db, p)
+        if best is not None:
+            v, b0, p = best
+            # Reject the fit when blobs disagree badly with ANY lattice:
+            # a card whose numbers are not remotely gridded would get a
+            # forced nonsense emission here otherwise. Normalised against
+            # blob count — a handful of pixels of overlap per blob is
+            # normal handwriting noise.
+            if v <= max(80.0, 3.5 * len(ivs)):
+                out = [int(round(b0 + k * p)) for k in range(columns + 1)]
+                if out[0] >= 0 and out[-1] <= w_ - 1:
+                    return out
+        # No trustworthy periodicity — fall through to the ink/support
+        # path below rather than forcing a bad fit.
+
+    x0_hdr = float(hdr[0])
+    p0 = (hdr[1] - hdr[0]) / float(columns)
+    if p0 < 12:
+        return None
+
+    best = None
+    lo_lim = x0_hdr - 0.25 * p0
+    hi_lim = float(hdr[1]) + 0.15 * p0
+
+    def in_margin(x):
+        # A cut sits in a margin when its clear run is far wider than
+        # any inter-column gutter (~0.15 pitch): blank paper beyond the
+        # grid scores zero ink and would lure the search outside the
+        # card entirely.
+        if smo[int(np.clip(x, 0, w_ - 1))] > 0.05:
+            return False
+        l_ = r_ = int(x)
+        while l_ - 1 >= 0 and smo[l_ - 1] <= 0.05:
+            l_ -= 1
+        while r_ + 1 < w_ and smo[r_ + 1] <= 0.05:
+            r_ += 1
+        return (r_ - l_) > 0.45 * p0
+
+    fs = 0.78
+    while fs <= 1.151:
+        p = p0 * fs
+        dstep = max(2, int(0.02 * p))
+        dx = int(-0.18 * p)
+        while dx <= int(0.12 * p):
+            xs = [int(round(x0_hdr + dx + k * p)) for k in range(1, columns)]
+            # Keep every cut inside the plausible grid span AND out of
+            # page margins, and require cross-row support so digit gaps
+            # cannot masquerade as cell boundaries. Keystone tilt shifts
+            # a boundary a few px between rows, hence the +-window and
+            # mean-based (not all-or-nothing) support test.
+            sup_win = max(4, int(0.03 * p))
+            sups = [support(x, sup_win) if
+                    (lo_lim <= x <= hi_lim and 3 <= x <= w_ - 4
+                     and not in_margin(x)) else 0.0 for x in xs]
+            if float(np.mean(sups)) >= 0.7:
+                s = sum(smo[x] for x in xs) / len(xs)
+                # mild preference to stay near the header-implied model
+                x_end = x0_hdr + dx + columns * p
+                s += 0.004 * ((abs(dx) + abs(x_end - hdr[1])) / p)
+                if best is None or s < best[0]:
+                    best = (s, [int(round(x0_hdr + dx + k * p))
+                                for k in range(columns + 1)])
+            dx += dstep
+        fs += 0.02
+
+    if best is None:
+        return None
+    # Only leave the header-implied span when content clearly prefers
+    # it: a marginal win just perturbs healthy grids and trips the
+    # regularity checks on borderline crops. But when the header span
+    # itself has no cross-row gutter support (phantom left margin, e.g.
+    # IMG_4949 cards 2/5/6), a supported candidate always wins.
+    base_xs = [x0_hdr + k * p0 for k in range(1, columns)]
+    if all(3 <= x <= w_ - 4 for x in base_xs):
+        base_s = sum(smo[int(round(x))] for x in base_xs) / len(base_xs)
+        sup_win = max(4, int(0.03 * p0))
+        base_sup = float(np.mean([support(x, sup_win)
+                                  for x in base_xs]))
+        if base_sup >= 0.7 and best[0] > base_s * 0.85:
+            return None
+    # Emit a UNIFORM lattice from the winning start/pitch rather than the
+    # raw per-cut positions: the collision snap below localises each cut,
+    # while downstream regularity checks expect even spacing (a ragged
+    # global lattice pushed borderline cards past the reject threshold).
+    xs = best[1]
+    x_start = float(xs[0])
+    p_fit = (float(xs[-1]) - x_start) / float(columns)
+    return [int(round(x_start + k * p_fit)) for k in range(columns + 1)]
+
+
+def extract_grid_cells(warped, rows=5, columns=5, min_junk_pitch=0):
     """
     Extract the 5×5 cells from a single card image.
 
@@ -757,6 +1294,7 @@ def extract_grid_cells(warped, rows=5, columns=5):
     # grid lines and drag the row fit into slicing through digits.
     floor = max(0.12, 0.25 * float(hprof.max()) / w)
     max_run = max(8, int(0.02 * h))
+    edge_z = max(8, int(0.02 * h))
     candidates = []
     y = 0
     while y < h:
@@ -764,12 +1302,18 @@ def extract_grid_cells(warped, rows=5, columns=5):
             run_start = y
             while y + 1 < h and hprof[y + 1] > floor * w:
                 y += 1
-            touches_edge = run_start <= 7 or y >= h - 8
+            # A generous edge zone rejects deskew slivers AND the dark
+            # paper/table transition, which on tight crops sits far
+            # enough inside to read as a strong full-width divider
+            # (IMG_4956 card 5: it dragged the whole row fit one band
+            # low, silently discarding the top row of numbers).
+            touches_edge = run_start <= edge_z or y >= h - edge_z
             too_thick = (y - run_start + 1) > max_run
             if not touches_edge and not too_thick:
                 run = hprof[run_start:y + 1]
                 peak_y = run_start + int(np.argmax(run))
-                candidates.append((peak_y, float(run.max()) / w))
+                candidates.append((peak_y, float(run.max()) / w,
+                                   y - run_start + 1))
         y += 1
 
     # Digit-ink banding gives an independent read of the row pitch:
@@ -778,18 +1322,85 @@ def extract_grid_cells(warped, rows=5, columns=5):
     # rules out aliased step sizes when only sparse dividers survive.
     ink = binary.mean(axis=1).astype(np.float32) / 255.0
     ink = np.convolve(ink, np.ones(15) / 15, mode="same")
-    ac = np.correlate(ink - ink.mean(), ink - ink.mean(), mode="full")
-    ac = ac[len(ink) - 1:]
-    lo, hi = int(h * 0.10), max(int(h * 0.10) + 1, int(h * 0.26))
-    prior_pitch = None
-    if hi > lo and ac[0] > 0:
-        window = ac[lo:hi]
-        if float(window.max()) > 0.05 * float(ac[0]):
-            prior_pitch = float(np.argmax(window) + lo)
+    prior_pitch, prior_strength, prior_dom = _ac_prior(ink, 0.10, 0.26)
+    prior_conf = (prior_strength, prior_dom)
 
-    y_lines = _fit_regular_rows(candidates, h, rows, prior_pitch=prior_pitch)
+    # ----- Header-anchored grid ----------------------------------------------
+    # The B I N G O strip pins the grid geometry without any divider
+    # evidence: its bottom edge is the grid top and its width predicts
+    # the row pitch. Tried first; the line fitter below remains the
+    # path for headerless sheets.
+    hdr = _find_header_band(warped)
+    fitted = None
+    if hdr is not None:
+        if FIND_DEBUG:
+            print(f"  [grid] header band x{hdr[0]}-{hdr[1]} y{hdr[2]}-{hdr[3]}")
+        fitted = _anchor_grid_from_header(warped.shape, hdr, ink,
+                                          prior_pitch=prior_pitch,
+                                          prior_conf=prior_conf)
+
+    if fitted is None:
+        fitted = _fit_regular_rows(candidates, h, rows, prior_pitch=prior_pitch,
+                                   prior_conf=prior_conf,
+                                   ring_profile=ink)
+    rows_fitted = fitted is not None
+
+    # A line-fitted grid can still open on the header strip: its bottom
+    # border reads as a strong divider, so the letters land in "row 1"
+    # and the true last row falls past the last boundary. The letter
+    # census exposes this — a header row holds a handful of wide flat
+    # glyphs where a digit row holds many tall ones — and the fix is to
+    # drop the first boundary and extrapolate one pitch at the bottom.
+    if rows_fitted and hdr is None:
+        n_tot, big0 = _band_letter_census(binary, fitted[0] + 4,
+                                          fitted[1] - 4)
+        others_big = []
+        for k in range(1, min(rows, 4) + 1):
+            _, bk = _band_letter_census(binary, fitted[k] + 4,
+                                        fitted[k + 1] - 4)
+            others_big.append(bk)
+        if n_tot >= 3 and big0 <= 5 and others_big \
+                and float(np.median(others_big)) >= 10:
+            step = float(np.median(np.diff(fitted)))
+            shifted = list(fitted[1:]) + [fitted[-1] + step]
+            if FIND_DEBUG:
+                print(f"  [grid] header-as-row-1 detected (big0={big0}, "
+                      f"others={others_big}); shifting grid down one pitch")
+            fitted = [int(round(v)) for v in shifted]
+            rows_fitted = True
+
+    # Coverage repair: a line-fitted grid can also START one band low —
+    # sparse divider evidence plus a paper-edge artefact leaves the top
+    # row of numbers above fitted[0] entirely (IMG_4956 card 5: grid
+    # began on row 2). When the band just above the fitted top carries
+    # digit-row glyph density, shift the whole lattice up one pitch and
+    # drop the trailing boundary.
+    if rows_fitted and hdr is None:
+        step0 = float(np.median(np.diff(fitted)))
+        up_y0 = int(fitted[0] - step0)
+        if up_y0 >= int(0.05 * h):
+            _, big_up = _band_letter_census(binary, up_y0 + 4,
+                                            fitted[0] - 4)
+            # Only shift when the space BELOW the grid is empty margin
+            # (paper-edge artefact pulled the fit down). If rows continue
+            # below, the band above is more likely a title strip and the
+            # fit was right all along.
+            below_a = int(min(h - 1, fitted[-1] + 4))
+            below_b = int(min(h, fitted[-1] + max(6, int(0.6 * step0))))
+            ink_below = float(binary[below_a:below_b].mean() / 255.0) \
+                if below_b - below_a >= 4 else 1.0
+            if big_up >= 8 and ink_below < 0.02:
+                if FIND_DEBUG:
+                    print(f"  [grid] row missing above fitted top "
+                          f"(big_up={big_up}); shifting grid up one pitch")
+                fitted = ([up_y0] + list(fitted[:-1]))
+                rows_fitted = True
+
+    y_lines = fitted
 
     if y_lines is None:
+        # No divider evidence at all — bare table yields no candidates.
+        # Callers treat rows_fitted=False as grounds for rejection.
         y_lines = list(np.linspace(int(h * 0.12), int(h * 0.92), rows + 1).astype(int))
     y_lines = [int(np.clip(y, 0, h - 1)) for y in y_lines]
 
@@ -799,9 +1410,25 @@ def extract_grid_cells(warped, rows=5, columns=5):
     # clustering below is only a fallback: its component filters reject
     # many real digits, which starves the k-means of clusters and lets it
     # invent dividers that slice straight through numbers.
+    # When a header anchored the rows, its x-span brackets the card:
+    # the six dividers simply tile that span, no line evidence needed —
+    # these sheets' verticals are as faint as their horizontals, and
+    # neighbouring cards' columns can leak in through fused crops.
+    # The collision-escape pass below cleans up any residual drift.
     y0 = max(0, y_lines[0] - 5)
     y1 = min(h, y_lines[-1] + 5)
-    x_lines = _fit_vertical_dividers(g, y0, y1, w, columns)
+    x_shift = 0
+    if hdr is not None:
+        x_lines = _fit_column_lattice(gray, hdr, columns, y_lines)
+        if x_lines is None:
+            x_lines = [int(round(v)) for v in
+                       np.linspace(hdr[0], hdr[1], columns + 1)]
+        # Lattice search can push an endpoint past the crop edge
+        # (oversized pitch); clamp so downstream window bounds stay
+        # inside the profile arrays.
+        x_lines = [int(np.clip(v, 2, w - 2)) for v in x_lines]
+    else:
+        x_lines = _fit_vertical_dividers(g, y0, y1, w, columns)
 
     if x_lines is None:
         roi = g[y0:y1, :]
@@ -877,34 +1504,21 @@ def extract_grid_cells(warped, rows=5, columns=5):
     # Deskew cancels rotation but not perspective (keystone): printed
     # verticals drift horizontally across the card height, so a global
     # x per divider that clears digits in one row can slice them in
-    # another. Rather than hunting for the exact gutter — ambiguous,
-    # because whitespace pockets inside a cell rival gutters in ink —
-    # each cut only has to STOP COLLIDING: while it touches digit ink
-    # it slides right to the first clean corridor, i.e. just past
-    # whatever it was slicing. Cuts already sitting in whitespace stay
-    # exactly where the fitter put them, preserving grid alignment.
+    # another. Each cut therefore snaps per row to the least-ink spot
+    # within a NARROW symmetric window around its fitted position.
+    # Bounded drift preserves cell widths (an earlier corridor-chasing
+    # version let cuts wander half a column, producing razor-thin and
+    # double-wide cells), and the least-ink target still works on
+    # daubed/marked rows where no true whitespace corridor exists.
     step = float(np.median(np.diff(x_lines)))
     min_sep = max(8, int(0.05 * step))
-    reach = int(0.45 * step)  # max slide; keeps a cut inside its column pair
-    clean_T = 0.03            # band-ink fraction under which a column is clear
-    clean_run = 4             # consecutive clear columns required
+    wx = max(3, int(0.20 * step))  # half-window for vertical cut snaps
 
-    def first_clean(band, lo, hi):
-        """Midpoint of the first >=clean_run clear stretch in [lo, hi),
-        with the stretch capped so wide gutters don't fling the cut
-        into the middle of the neighbouring cell's whitespace."""
-        clear = band <= clean_T
-        run = 0
-        for x in range(max(0, lo), min(len(band), hi)):
-            run = run + 1 if clear[x] else 0
-            if run >= clean_run:
-                start = x - clean_run + 1
-                end = x
-                while end + 1 < len(band) and clear[end + 1] \
-                        and end - start < max(clean_run, int(0.15 * step)):
-                    end += 1
-                return (start + end) // 2
-        return None
+    # Full-crop print mask, shared by the vertical and the per-column
+    # horizontal refinement below. Local-median, not a fixed threshold:
+    # flat shadows must not read as ink.
+    locmed_full = cv2.medianBlur(gray, 51).astype(np.int16)
+    pm_full = gray.astype(np.int16) < locmed_full - 35
 
     row_cuts = []
     for r in range(rows):
@@ -913,41 +1527,190 @@ def extract_grid_cells(warped, rows=5, columns=5):
         if y_bot - y_top < 12:
             row_cuts.append(list(x_lines))
             continue
-        # Raw grayscale, not the CLAHE copy: CLAHE amplifies paper
-        # texture so whitespace stops reading as clean, while digits
-        # are dark enough in the plain image for the collision test.
-        band = (gray[y_top:y_bot] < 150).mean(axis=0)
+        band = pm_full[y_top:y_bot].mean(axis=0)
+        sm_band = np.convolve(band, np.ones(7) / 7, mode="same")
+
+        def run_centre(cand, a, b):
+            # Gutters between digit groups read as plateaus of low ink;
+            # plain argmin lands anywhere on the plateau — often on its
+            # edge, splitting the neighbouring cell's digits. Expand to
+            # the contiguous near-minimum run and take its midpoint so
+            # the cut sits in the middle of the whitespace.
+            t = sm_band[cand] + 0.015
+            l_ = r_ = cand
+            while l_ - 1 >= a and sm_band[l_ - 1] <= t:
+                l_ -= 1
+            while r_ + 1 < b and sm_band[r_ + 1] <= t:
+                r_ += 1
+            return (l_ + r_) // 2
+
         cuts = []
         for k, xp in enumerate(x_lines):
             xp = int(np.clip(xp, 0, w - 1))
             lo = cuts[k - 1] + min_sep if k else 2
             hi = int(x_lines[k + 1]) - min_sep if k + 1 < len(x_lines) else w - 3
-            pos = None
-            if lo <= xp <= hi and band[xp] > clean_T:
-                pos = first_clean(band, max(xp, lo), min(hi + 1, xp + reach))
-                if pos is not None and not (lo <= pos <= hi):
-                    pos = None
-                if pos is None:
-                    # No fully clear corridor within reach (dense digits,
-                    # or keystone drift larger than the reach): settle for
-                    # the least-ink spot so the cut grazes as few digits
-                    # as possible instead of standing mid-ink.
-                    a = max(lo, int(xp - reach))
-                    b = min(hi + 1, int(xp + reach) + 1)
-                    if b - a > 10:
-                        sm = np.convolve(band[a:b], np.ones(5) / 5, "same")
-                        pos = a + int(np.argmin(sm))
-            if pos is None:
-                # Either already clean (keep the fitted position — it
-                # tracks the printed grid) or no clean corridor within
-                # reach (keep the fitter's guess rather than wandering
-                # into the neighbouring column).
-                pos = int(np.clip(xp, lo, hi))
+            a, b = max(lo, xp - wx), min(hi + 1, xp + wx + 1)
+            pos = xp
+            if b - a > 6:
+                cand = run_centre(a + int(np.argmin(sm_band[a:b])), a, b)
+                # Move only for a real improvement: on fully daubed rows
+                # every candidate sits in ink, and chasing the least-ink
+                # pixel just makes cuts wander off the printed grid.
+                if sm_band[cand] <= 0.05 or \
+                        sm_band[cand] < sm_band[xp] - 0.01:
+                    pos = cand
+                elif sm_band[pos] > 0.10:
+                    # Still colliding: keystone can push a gutter past
+                    # the standard window on edge rows. One wider,
+                    # clamped retry before giving up.
+                    wa = max(lo, xp - 2 * wx)
+                    wb = min(hi + 1, xp + 2 * wx + 1)
+                    if wb - wa > 6:
+                        wc = run_centre(wa + int(np.argmin(sm_band[wa:wb])),
+                                        wa, wb)
+                        if sm_band[wc] < sm_band[pos] - 0.02:
+                            pos = wc
+            pos = int(np.clip(pos, lo, hi))
             cuts.append(pos)
         for k in range(1, len(cuts)):
             cuts[k] = max(cuts[k], cuts[k - 1] + min_sep)
         cuts[-1] = min(cuts[-1], w - 1)
         row_cuts.append(cuts)
+
+    # Tilt-aware vertical smoothing: the same keystone drifts column
+    # boundaries across card height (IMG_4948 card 3: bottom two rows
+    # sliced). Fit each interior cut with a quadratic trend over row
+    # centres (perspective bends dividers, a line cannot track that —
+    # IMG_4956 card 2) and clamp residuals.
+    vstep = float(np.median(np.diff(y_lines)))
+    row_ycent = [0.5 * (y_lines[r] + y_lines[r + 1]) for r in range(rows)]
+    clamp_x = max(5, int(0.22 * float(np.median(np.diff(x_lines)))))
+    for k in range(1, len(row_cuts[0]) - 1):
+        pxs = [row_ycent[r] for r in range(rows)
+               if len(row_cuts[r]) == len(row_cuts[0])]
+        pys = [row_cuts[r][k] for r in range(rows)
+               if len(row_cuts[r]) == len(row_cuts[0])]
+        if len(pxs) >= 3 and float(np.ptp(pxs)) > 1:
+            z = np.polyfit(pxs, pys, 2 if len(pxs) >= 5 else 1)
+            for r in range(rows):
+                if len(row_cuts[r]) != len(row_cuts[0]):
+                    continue
+                pred = float(np.polyval(z, row_ycent[r]))
+                dev = row_cuts[r][k] - pred
+                row_cuts[r][k] = int(round(
+                    pred + float(np.clip(dev, -clamp_x, clamp_x))))
+            # restore monotonicity after clamping
+            for r in range(rows):
+                if len(row_cuts[r]) != len(row_cuts[0]):
+                    continue
+                min_sep_k = max(4, int(0.10 *
+                                       float(np.median(np.diff(x_lines)))))
+                for kk in range(1, len(row_cuts[r])):
+                    row_cuts[r][kk] = max(row_cuts[r][kk],
+                                          row_cuts[r][kk - 1] + min_sep_k)
+
+    # ----- Row shear model ----------------------------------------------------
+    # Keystone tilts the whole row structure: boundaries descend (or
+    # rise) linearly across the card width, so a single global y_lines
+    # is only correct at one horizontal position. Independent per-
+    # column snapping cannot recover it — on marked cards the least-ink
+    # spot inside a column is usually a DIGIT GAP, not the boundary
+    # (IMG_4903 card 2: greens sank into numbers toward the right,
+    # stacking two numbers into one cell). Printed rules are too faint
+    # to track here, so estimate ONE global shear from the ink itself:
+    # the correct slope maximises the contrast of the row projection
+    # after de-shearing, because digit bands align into sharp stripes.
+    # A straight shear cannot express keystone curvature (rows converge
+    # toward one side when the card sat off-axis: IMG_4948 cards 2/4/5
+    # and IMG_4949 card 6, worse on one edge), so after the slope a
+    # quadratic term q*(u^2 - 1/3) is fitted the same way — u normalised
+    # to [-1,1] across the grid, -1/3 centring keeps the mean shift at
+    # zero so fitting q never drags every boundary up or down together.
+    ystep = float(np.median(np.diff(y_lines)))
+    gx0 = int(np.clip(x_lines[0], 0, w - 2))
+    gx1 = int(np.clip(x_lines[-1] + 1, 1, w))
+    gy0 = int(np.clip(y_lines[0], 0, h - 2))
+    gy1 = int(np.clip(y_lines[-1] + 1, 1, h))
+    sub = pm_full[gy0:gy1, gx0:gx1]
+    gys, gxs = np.nonzero(sub)
+    shear = 0.0
+    quad = 0.0
+    xc = float(0.5 * (x_lines[0] + x_lines[-1]))
+    hw = max(1.0, 0.5 * (x_lines[-1] - x_lines[0]))
+    if len(gys) > 500:
+        if len(gys) > 300000:  # subsample for speed; statistics suffice
+            idx = np.random.default_rng(7).choice(len(gys), 300000,
+                                                  replace=False)
+            gys, gxs = gys[idx], gxs[idx]
+        xs_f = gxs.astype(np.float32) + gx0
+        ys_f = gys.astype(np.float32) + gy0
+        us_f = ((xs_f - xc) / hw).astype(np.float32)
+        best_v = -1.0
+
+        def shear_score(s, qv=0.0):
+            yy = np.clip(ys_f + s * (xs_f - xc)
+                         + qv * (us_f * us_f - 1.0 / 3.0), 0, h - 1)
+            prof = np.bincount(yy.astype(np.int32), minlength=h)
+            prof = np.convolve(prof.astype(np.float32),
+                               np.ones(9) / 9, mode="same")
+            return float(np.var(prof))
+
+        coarse = np.arange(-0.08, 0.0801, 0.004)
+        s0 = max(coarse, key=shear_score)
+        fine = np.arange(s0 - 0.004, s0 + 0.00401, 0.001)
+        shear = float(max(fine, key=shear_score))
+        if abs(shear) < 0.005:
+            shear = 0.0  # noise level; keep global lines
+
+        cquad = np.arange(-60, 60.1, 5)
+        q0 = max(cquad, key=lambda v_: shear_score(shear, v_))
+        fquad = np.arange(q0 - 5, q0 + 5.01, 1)
+        quad = float(max(fquad, key=lambda v_: shear_score(shear, v_)))
+        if abs(quad) < 4:
+            quad = 0.0  # below noise; straight boundaries are fine
+
+    col_rows = []
+    col_xcent = []
+    micro = max(3, int(0.06 * ystep))
+    for c in range(columns):
+        xa = int(row_cuts[rows - 1][c])
+        xb = int(row_cuts[rows - 1][c + 1])
+        col_xcent.append(0.5 * (xa + xb))
+        if xb - xa < 12:
+            col_rows.append([int(v) for v in y_lines])
+            continue
+        prof = np.convolve(pm_full[:, xa:xb].mean(axis=1),
+                           np.ones(7) / 7, mode="same")
+
+        def run_centre_y(cand, a, b):
+            t = prof[cand] + 0.015
+            l_ = r_ = cand
+            while l_ - 1 >= a and prof[l_ - 1] <= t:
+                l_ -= 1
+            while r_ + 1 < b and prof[r_ + 1] <= t:
+                r_ += 1
+            return (l_ + r_) // 2
+
+        ys = []
+        for k, yp in enumerate(y_lines):
+            # Shear + keystone model first: boundary height at THIS
+            # column's centre.
+            u_c = (col_xcent[c] - xc) / hw
+            yc = int(round(yp + shear * (col_xcent[c] - xc)
+                           + quad * (u_c * u_c - 1.0 / 3.0)))
+            yc = int(np.clip(yc, 0, h - 1))
+            # Micro-snap only across a clean whitespace run — wide enough
+            # to tidy the model, far too narrow to reach a digit gap.
+            a, b = max(0, yc - micro), min(h, yc + micro + 1)
+            ny = yc
+            if b - a > 4:
+                cand = run_centre_y(a + int(np.argmin(prof[a:b])), a, b)
+                if prof[cand] <= 0.05:
+                    ny = cand
+            if ys and ny <= ys[-1]:
+                ny = ys[-1] + max(3, int(0.10 * ystep))
+            ys.append(min(ny, h - 1))
+        col_rows.append(ys)
 
     # ----- Extract cells with modest inset to avoid grid-line ink ----------
     cells = []
@@ -955,14 +1718,23 @@ def extract_grid_cells(warped, rows=5, columns=5):
         row_cells = []
         for c in range(columns):
             x1, x2 = row_cuts[r][c], row_cuts[r][c + 1]
-            y1, y2 = y_lines[r], y_lines[r + 1]
+            y1, y2 = col_rows[c][r], col_rows[c][r + 1]
             mx = max(3, (x2 - x1) // 10)
             my = max(3, (y2 - y1) // 10)
             cell = warped[y1 + my:y2 - my, x1 + mx:x2 - mx]
             row_cells.append(cell)
         cells.append(row_cells)
 
-    return cells, x_lines, y_lines, row_cuts
+    # A pitch-based junk guard (rejecting ~60px columns as "torn
+    # slivers") was tried and reverted: genuine cards span 47-113px per
+    # column depending on how far the photo was taken from the sheet,
+    # overlapping the sliver range completely. Junk fragments are left
+    # to the caller to crop out of the source photos.
+    if min_junk_pitch > 0 and rows_fitted and len(x_lines) > 1 and \
+            float(np.median(np.diff(x_lines))) < min_junk_pitch:
+        rows_fitted = False
+
+    return cells, x_lines, y_lines, row_cuts, rows_fitted, col_rows
 
 
 
@@ -988,7 +1760,9 @@ def grid_quality(card, x_lines, y_lines, row_cuts):
         y_bot = int(np.clip(y_lines[r + 1] - span // 8, 0, h))
         if y_bot - y_top < 12:
             continue
-        band = (gray[y_top:y_bot] < 150).mean(axis=0)
+        strip = gray[y_top:y_bot]
+        locmed = cv2.medianBlur(strip, 51).astype(np.int16)
+        band = (strip.astype(np.int16) < locmed - 35).mean(axis=0)
         for xp in row_cuts[r][1:-1]:
             lo, hi = max(0, int(xp) - 3), min(w, int(xp) + 4)
             inks.append(float(band[lo:hi].mean()))
@@ -1020,7 +1794,8 @@ def save_corner_debug(image, corners, filename):
     cv2.imwrite(str(filename), debug)
 
 
-def draw_grid_debug(card, x_lines, y_lines, filename, row_cuts=None):
+def draw_grid_debug(card, x_lines, y_lines, filename, row_cuts=None,
+                    col_rows=None):
     debug = card.copy()
     if row_cuts is None:
         for x in x_lines:
@@ -1035,9 +1810,21 @@ def draw_grid_debug(card, x_lines, y_lines, filename, row_cuts=None):
             for x in row_cuts[r]:
                 cv2.line(debug, (int(x), int(y1)), (int(x), int(y2)),
                          (0, 0, 255), 2)
-    for y in y_lines:
-        cv2.line(debug, (0, int(y)), (debug.shape[1] - 1, int(y)),
-                 (0, 0, 255), 2)
+    if col_rows is None:
+        for y in y_lines:
+            cv2.line(debug, (0, int(y)), (debug.shape[1] - 1, int(y)),
+                     (0, 0, 255), 2)
+    else:
+        # Same idea for the horizontals: per-column refined boundaries,
+        # drawn green so they are distinguishable from the vertical cuts.
+        for c in range(len(col_rows)):
+            if c + 1 >= len(row_cuts[0]):
+                continue
+            x1, x2 = row_cuts[len(row_cuts) - 1][c], \
+                row_cuts[len(row_cuts) - 1][c + 1]
+            for y in col_rows[c]:
+                cv2.line(debug, (int(x1), int(y)), (int(x2), int(y)),
+                         (0, 255, 0), 2)
     cv2.imwrite(str(filename), debug)
 
 
@@ -1144,13 +1931,35 @@ def find_card_components(image):
         min_gap = max(12, w // 100)
         ccols = cuts_1d(colp, min_gap)
         crows = cuts_1d(rowp, min_gap)
-        cuts = ccols if len(ccols) >= len(crows) else crows
-        axis = 0 if len(ccols) >= len(crows) else 1
+        # Wide pieces are side-by-side cards even when internal row
+        # gutters outnumber the column seams (IMG_4903): one card never
+        # gets this wide relative to its height, so trust the vertical
+        # seams first instead of letting row-gap count win the vote.
+        if bw > 1.35 * bh and ccols:
+            axis, cuts = 0, ccols
+        else:
+            axis = 0 if len(ccols) >= len(crows) else 1
+            cuts = ccols if axis == 0 else crows
+        if FIND_DEBUG:
+            print(f"  [seg] recurse ({int(x)},{int(y)},{int(bw)}x{int(bh)}) "
+                  f"d{depth} ccols={len(ccols)} crows={len(crows)} "
+                  f"axis={'col' if axis == 0 else 'row'} ncuts={len(cuts)}")
         if not cuts:
             leaves.append([x, y, bw, bh, lid])
             return
         starts = [0] + [e + 1 for _, e in cuts]
         ends = [s for s, _ in cuts] + [(bw if axis == 0 else bh)]
+        # A column seam flanked on both sides by over-wide pieces is a
+        # false friend: real side-by-side cards are never each wider
+        # than ~2.3x their height. IMG_4903's single wide cards carry a
+        # mid-sheet shadow seam that used to be split on, destroying
+        # the card. Keep such pieces whole.
+        if axis == 0 and bw > 1.8 * bh:
+            pieces = [(b - a) for a, b in zip(starts, ends)
+                      if b - a >= 0.10 * w]
+            if len(pieces) >= 2 and all(p > 2.3 * bh for p in pieces):
+                leaves.append([x, y, bw, bh, lid])
+                return
         for a, b in zip(starts, ends):
             if b - a < (0.10 * w if axis == 0 else 0.08 * h):
                 continue
@@ -1158,13 +1967,6 @@ def find_card_components(image):
                 recurse(x + a, y, b - a, bh, lid, depth + 1)
             else:
                 recurse(x, y + a, bw, b - a, lid, depth + 1)
-
-    for i in sorted(range(1, n_blobs),
-                    key=lambda i_: -blob_stats[i_, cv2.CC_STAT_AREA]):
-        x, y, bw, bh, area = blob_stats[i]
-        if area < 0.005 * w * h:
-            continue
-        recurse(x, y, bw, bh, i, 0)
 
     # Stacked cards hide from the projection splitter: printed sheets
     # put consecutive rows of cards nearly in contact, so the seam has
@@ -1174,6 +1976,10 @@ def find_card_components(image):
     # well-separated pink bands is several vertically stacked cards,
     # with each band marking a card's top edge. Photos without colour
     # headers have no pink at all and pass through untouched.
+    #
+    # This runs on WHOLE blobs before recursion: recursing first can
+    # carve a stacked sheet into cross-card slivers that no later stage
+    # can reassemble (IMG_4903).
 
     def split_pink(leaf):
         x, y, bw, bh, lid = leaf
@@ -1199,7 +2005,10 @@ def find_card_components(image):
         # from every header. Distance to the nearest accepted band lets
         # long stacks chain link by link. Title strips above the first
         # card fail the pitch test too, which simply leaves the crop
-        # starting there.
+        # starting there. Once two bands are merged the local pitch is
+        # known, so the lower bound tightens to just over half of it —
+        # perspective can shrink far cards to ~0.6x the near ones
+        # (IMG_4903), which the fixed 650px floor used to reject.
         peaks = [(t, v) for t, v in peaks if t <= bh - max(150, int(0.12 * bh))]
         if not peaks:
             return [leaf]
@@ -1213,7 +2022,12 @@ def find_card_components(image):
                 if p in merged:
                     continue
                 d = min(abs(p[0] - a[0]) for a in merged)
-                if 650 <= d <= 1500:
+                lo = 650
+                if len(merged) >= 2:
+                    gaps = [abs(a[0] - b[0]) for ai, a in enumerate(merged)
+                            for b in merged[ai + 1:]]
+                    lo = min(650, int(0.55 * min(gaps)))
+                if lo <= d <= 1500:
                     merged.append(p)
                     changed = True
         merged.sort(key=lambda p_: p_[0])
@@ -1228,8 +2042,6 @@ def find_card_components(image):
         if bh - prev >= int(0.08 * h):
             segs.append((prev, bh))
         return [[x, y + a, bw, b - a, lid] for a, b in segs] or [leaf]
-
-    leaves = [piece for leaf in leaves for piece in split_pink(leaf)]
 
     # Trim each leaf down to its content: blob bboxes routinely include
     # stretches of bare table or neighbouring clutter, and a crop that
@@ -1254,34 +2066,198 @@ def find_card_components(image):
         c0, c1 = bounds(cont.sum(axis=0) / 255.0)
         return [x + c0, y + r0, c1 - c0 + 1, r1 - r0 + 1, lid]
 
-    leaves = [trim_leaf(l) for l in leaves]
+    # Two orderings, keep the better: splitting whole blobs on pink
+    # card-tops BEFORE recursion rescues stacked-card sheets whose
+    # texture blob spans everything (IMG_4903), but on other sheets the
+    # root-scale pink peaks include FREE squares and title strips that
+    # do not mark card tops — slicing there chops real cards into
+    # aspect-dead strips (IMG_4910/4911). Recursion-first is the legacy
+    # behaviour and stays the fallback. Both variants run to validated
+    # leaf sets and whichever keeps more cards wins.
+    def build_leaves(split_first):
+        leaves.clear()
+        bases = []
+        for i in sorted(range(1, n_blobs),
+                        key=lambda i_: -blob_stats[i_, cv2.CC_STAT_AREA]):
+            x, y, bw, bh, area = blob_stats[i]
+            if area < 0.005 * w * h:
+                continue
+            piece = [int(x), int(y), int(bw), int(bh), i]
+            if split_first:
+                bases.extend(split_pink(piece))
+            else:
+                bases.append(piece)
+        for rx, ry, rw, rh, rlid in bases:
+            recurse(rx, ry, rw, rh, rlid, 0)
+        if not split_first:
+            leaves[:] = [piece for l_ in leaves
+                         for piece in split_pink(l_)]
+        if FIND_DEBUG:
+            tag = "split-first" if split_first else "recurse-first"
+            print(f"  [seg] {tag} leaves: "
+                  f"{[(int(a_), int(b_), int(c_), int(d_)) for a_, b_, c_, d_, _ in leaves]}")
+        return [trim_leaf(l_) for l_ in leaves]
 
-    # Validation: plausible card shape, enough print ink, and size
-    # comparable to the other cards of this photo (cards in one shot
-    # share scale; stragglers are junk).
+    def cheap_ok(lf):
+        x, y, bw, bh, lid = lf
+        if bw < 0.12 * w or bh < 0.08 * h:
+            return False
+        ar = bw / bh
+        # Upper bound sits just above the widest real card observed —
+        # IMG_4903's sheet carries landscape cards of aspect ~2.0 after
+        # trim; junk strips are far beyond it, so a small margin costs
+        # nothing.
+        if not 0.55 <= ar <= 2.25:
+            return False
+        mm = blob_labels[y:y + bh, x:x + bw] == lid
+        pm = np.where(mm, print_m[y:y + bh, x:x + bw], 0)
+        return pm.sum() / 255 >= 0.05 * bw * bh
+
+    def evidence_ok(lf):
+        # Divider-evidence + quality gate: a leaf only counts as a card
+        # if the FULL extraction pipeline accepts it (grid fit found AND
+        # regularity/ink within limits). Mirror the crop geometry of
+        # extract_card_grids (mask minAreaRect + quad growth + warp) —
+        # a plain rect crop answers differently from what extraction
+        # later decides (IMG_4944).
+        try:
+            x, y, bw, bh, lid = lf
+            # Same padded window as extract_card_grids: the grown quad
+            # can reach outside the leaf rect, and there it must sample
+            # real photo pixels rather than black fill.
+            px_, py_ = int(0.25 * bw), int(0.40 * bh)
+            x0, y0 = max(0, x - px_), max(0, y - py_)
+            x1 = min(image.shape[1], x + bw + px_)
+            y1 = min(image.shape[0], y + bh + py_)
+            sub = image[y0:y1, x0:x1]
+            # Blob id regions can spill past a pink-cut piece's rect
+            # (siblings share one component id); restrict to the leaf
+            # rect exactly like the out_labels painting does, or the
+            # minAreaRect swallows neighbouring cards.
+            sm_full = (blob_labels[y0:y1, x0:x1] == lid)
+            sm = np.zeros(sm_full.shape, np.uint8)
+            yo, xo = y - y0, x - x0
+            sm[yo:yo + bh, xo:xo + bw] = \
+                sm_full[yo:yo + bh, xo:xo + bw]
+            sm *= np.uint8(255)
+            rect = cv2.minAreaRect(np.column_stack(
+                np.nonzero(sm))[:, ::-1].astype(np.float32))
+            box = order_points(cv2.boxPoints(rect))
+            centre = box.mean(axis=0)
+            box = centre + (box - centre) * (1.12, 1.28)
+            ccard = four_point_warp(sub, box)
+            sm_w = four_point_warp(sm, box)
+            mys, mxs = np.nonzero(sm_w > 127)
+            ty, by = int(mys.min()), int(mys.max())
+            tx, bx = int(mxs.min()), int(mxs.max())
+            pad_y = max(0, int(0.10 * (by - ty)))
+            pad_x = max(0, int(0.06 * (bx - tx)))
+            ty, tx = max(0, ty - pad_y), max(0, tx - pad_x)
+            by = min(ccard.shape[0], by + pad_y)
+            bx = min(ccard.shape[1], bx + pad_x)
+            ccard = _deskew_header(deskew(
+                ccard[ty:by, tx:bx]))
+            cells_, xl_, yl_, rc_, fitted_, cr_ = \
+                extract_grid_cells(ccard, min_junk_pitch=0)
+            if not fitted_:
+                if FIND_DEBUG:
+                    print(f"  [seg] evidence ({x},{y},{bw}x{bh}) -> "
+                          f"UNFITTED (rows/cols fit failed)")
+                    cv2.imwrite(f"/tmp/gate_{x}_{y}.png", ccard)
+                return False
+            q = grid_quality(ccard, xl_, yl_, rc_)
+            verdict = not (q["ink"] > 0.10 or q["y_reg"] > 0.30
+                           or q["x_reg"] > 0.35)
+            if FIND_DEBUG:
+                print(f"  [seg] evidence ({x},{y},{bw}x{bh}) -> "
+                      f"fitted={fitted_} q={q['y_reg']:.3f}/"
+                      f"{q['x_reg']:.3f}/{q['ink']:.4f} ok={verdict}")
+                cv2.imwrite(f"/tmp/gate_{x}_{y}.png", ccard)
+            return verdict
+        except Exception as exc:
+            if FIND_DEBUG:
+                print(f"  [seg] evidence ({lf[0]},{lf[1]}) EXC {exc}")
+            return False
+
+    variant_a = build_leaves(False)
+    variant_b = build_leaves(True)
+
+    # Cluster-union selection: neither leaf ordering wins everywhere.
+    # Recurse-first strips can truncate a card edge (IMG_4903 card 1),
+    # while split-first pink cuts can shear off header-only slabs that
+    # are not full cards (IMG_4910). Leaves from both variants that
+    # cover the same card region form one cluster; the cluster keeps
+    # its best gate-passing member, preferring split-first (pink-
+    # anchored boundaries). A cluster with no passing member is dropped.
+    cand_b = [lf for lf in sorted(variant_b, key=lambda l_: l_[1])
+              if cheap_ok(lf)]
+    cand_a = [lf for lf in sorted(variant_a, key=lambda l_: l_[1])
+              if cheap_ok(lf)]
+
+    def frac_small(r1, r2):
+        ix = max(0, min(r1[0] + r1[2], r2[0] + r2[2]) -
+                 max(r1[0], r2[0]))
+        iy = max(0, min(r1[1] + r1[3], r2[1] + r2[3]) -
+                 max(r1[1], r2[1]))
+        inter = ix * iy
+        if inter <= 0:
+            return 0.0
+        return inter / min(r1[2] * r1[3], r2[2] * r2[3])
+
+    clusters = []          # each: {"members":[(lf,variant)]}
+    for tag_, cands in (("B", cand_b), ("A", cand_a)):
+        for lf in cands:
+            best = None
+            for cl in clusters:
+                # Match against member rects only: growing the cluster
+                # rectangle lets a wide strip bridge two neighbouring
+                # cards into one cluster and swallow one of them
+                # (IMG_4955).
+                if any(frac_small(m[0][:4], lf[:4]) >= 0.55
+                       for m in cl["members"]):
+                    best = cl
+                    break
+            if best is None:
+                clusters.append({"members": [(lf, tag_)]})
+            else:
+                best["members"].append((lf, tag_))
+
     out_labels = np.zeros(image.shape[:2], np.int32)
     groups = []
     nid = 1
-    for x, y, bw, bh, lid in sorted(leaves, key=lambda l_: l_[1]):
-        if bw < 0.12 * w or bh < 0.08 * h:
+    n_dropped = 0
+    for cl in sorted(clusters,
+                     key=lambda c_: min(m[0][1] for m in c_["members"])):
+        members = sorted(cl["members"], key=lambda m_: m_[1])  # B first
+        chosen = None
+        for lf, _tag in members:
+            if evidence_ok(lf):
+                chosen = lf
+                break
+        if chosen is None:
+            n_dropped += 1
+            if FIND_DEBUG:
+                print(f"  [seg] cluster "
+                      f"@{[m[0][:4] for m in cl['members']]} dropped: "
+                      f"no divider evidence")
             continue
-        ar = bw / bh
-        if not 0.55 <= ar <= 1.9:
-            continue
+        x, y, bw, bh, lid = chosen
         mm = blob_labels[y:y + bh, x:x + bw] == lid
-        pm = np.where(mm, print_m[y:y + bh, x:x + bw], 0)
-        if pm.sum() / 255 < 0.05 * bw * bh:
-            continue
         out_labels[y:y + bh, x:x + bw][mm] = nid
-        groups.append({"ids": [nid], "bbox": (int(x), int(y), int(bw), int(bh))})
+        groups.append({"ids": [nid],
+                       "bbox": (int(x), int(y), int(bw), int(bh))})
         nid += 1
+    if FIND_DEBUG:
+        print(f"  [seg] clusters={len(clusters)} kept={len(groups)} "
+              f"(A leaves={len(cand_a)}, B leaves={len(cand_b)})")
     if groups:
         med_area = float(np.median(
             [g["bbox"][2] * g["bbox"][3] for g in groups]))
         keep = [g for g in groups
                 if g["bbox"][2] * g["bbox"][3] >= 0.25 * med_area]
         if len(keep) != len(groups):
-            bad = {g["ids"][0] for g in groups} - {g["ids"][0] for g in keep}
+            bad = {g["ids"][0] for g in groups} \
+                - {g["ids"][0] for g in keep}
             for b in bad:
                 out_labels[out_labels == b] = 0
             groups = keep
@@ -1398,7 +2374,12 @@ def process_image(image_path, output_dir="output", number_of_cards=3):
         cv2.imwrite(str(output_dir / "debug_grid_lines.png"), debug_mask)
 
         if sheet_corners is None:
-            raise RuntimeError("Could not detect the outer sheet boundary")
+            # Photos of bare tables (IMG_4945) legitimately contain no
+            # cards; report and move on instead of killing a whole
+            # batch run.
+            print("Could not detect the outer sheet boundary — "
+                  "no cards found")
+            return card_images
 
         save_corner_debug(image, sheet_corners,
                           output_dir / f"{stem}_corners_labelled.png")
@@ -1422,16 +2403,43 @@ def process_image(image_path, output_dir="output", number_of_cards=3):
         card_name = f"card_{idx + 1}"
 
         # Cancel any residual tilt — otherwise row-divider detection
-        # smears and slices through digits. Done before saving so every
+        # smears and slices through digits. The text-based estimate
+        # runs first; the header strip gives a second, colour-anchored
+        # read for cards that sit tilted inside an axis-aligned leaf,
+        # which plain deskew cannot see. Done before saving so every
         # debug image and cell crop shares the same coordinates.
         angle = estimate_skew_angle(card)
         card = deskew(card)
+        rot = _deskew_header(card)
+        if rot is not card:
+            angle2 = estimate_skew_angle(rot)
+            print(f"  {card_name}: header-levelled by "
+                  f"{angle - angle2:+.2f} deg")
+            card = rot
         print(f"  {card_name}: deskewed by {angle:+.2f} deg")
 
         cv2.imwrite(str(output_dir / f"{card_name}.png"), card)
 
-        cells, x_lines, y_lines, row_cuts = extract_grid_cells(card)
+        cells, x_lines, y_lines, row_cuts, rows_fitted, col_rows = \
+            extract_grid_cells(card)
+        if not rows_fitted:
+            print(f"  {card_name}: REJECTED (no divider evidence — not a card)")
+            cv2.imwrite(str(output_dir / f"{card_name}_rejected.png"), card)
+            continue
         q = grid_quality(card, x_lines, y_lines, row_cuts)
+        # Tiny AND dense = background fragment, not a card. Either
+        # signal alone is inconclusive — genuine cards photographed up
+        # close run 47-113px per column, and heavily daubed cards carry
+        # real ink — but a grid barely 60px wide whose cells hold >5%
+        # ink is scribble on a torn sliver (IMG_4948 card 1: ink 0.083;
+        # the smallest genuine card in the corpus sits at ink 0.002).
+        if q["ink"] > 0.05 and len(x_lines) > 1 and \
+                float(np.median(np.diff(x_lines))) < 70:
+            print(f"  {card_name}: REJECTED (tiny dense fragment "
+                  f"— ink={q['ink']:.3f} at "
+                  f"{float(np.median(np.diff(x_lines))):.0f}px columns)")
+            cv2.imwrite(str(output_dir / f"{card_name}_rejected.png"), card)
+            continue
         print(f"  {card_name}: quality y_reg={q['y_reg']:.3f} "
               f"x_reg={q['x_reg']:.3f} ink={q['ink']:.4f}")
         if q["ink"] > 0.10 or q["y_reg"] > 0.30 or q["x_reg"] > 0.35:
@@ -1441,7 +2449,7 @@ def process_image(image_path, output_dir="output", number_of_cards=3):
         save_cells(cells, output_dir / "cells", card_name)
         draw_grid_debug(card, x_lines, y_lines,
                         output_dir / f"{card_name}_grid_debug.png",
-                        row_cuts=row_cuts)
+                        row_cuts=row_cuts, col_rows=col_rows)
 
         print(f"  {card_name}: extracted {len(cells)}×{len(cells[0])} cells")
 
