@@ -1592,6 +1592,20 @@ def extract_grid_cells(warped, rows=5, columns=5, min_junk_pitch=0):
                if len(row_cuts[r]) == len(row_cuts[0])]
         if len(pxs) >= 3 and float(np.ptp(pxs)) > 1:
             z = np.polyfit(pxs, pys, 2 if len(pxs) >= 5 else 1)
+            # One row's escape measurement can be dragged into a
+            # scribble (bottom rows sit in shadow/clipping) and bend
+            # the shared trend for everyone. Drop the single worst
+            # residual — if it is truly extreme — and refit.
+            if len(pxs) >= 5:
+                resids = [abs(float(np.polyval(z, pxs[i])) - pys[i])
+                          for i in range(len(pxs))]
+                worst = int(np.argmax(resids))
+                lim = 0.12 * float(np.median(np.diff(x_lines)))
+                if resids[worst] > lim:
+                    keep = [i for i in range(len(pxs)) if i != worst]
+                    z = np.polyfit([pxs[i] for i in keep],
+                                   [pys[i] for i in keep],
+                                   2 if len(keep) >= 4 else 1)
             for r in range(rows):
                 if len(row_cuts[r]) != len(row_cuts[0]):
                     continue
@@ -1635,6 +1649,7 @@ def extract_grid_cells(warped, rows=5, columns=5, min_junk_pitch=0):
     gys, gxs = np.nonzero(sub)
     shear = 0.0
     quad = 0.0
+    cube = 0.0
     xc = float(0.5 * (x_lines[0] + x_lines[-1]))
     hw = max(1.0, 0.5 * (x_lines[-1] - x_lines[0]))
     if len(gys) > 500:
@@ -1647,9 +1662,10 @@ def extract_grid_cells(warped, rows=5, columns=5, min_junk_pitch=0):
         us_f = ((xs_f - xc) / hw).astype(np.float32)
         best_v = -1.0
 
-        def shear_score(s, qv=0.0):
+        def shear_score(s, qv=0.0, cv_=0.0):
             yy = np.clip(ys_f + s * (xs_f - xc)
-                         + qv * (us_f * us_f - 1.0 / 3.0), 0, h - 1)
+                         + qv * (us_f * us_f - 1.0 / 3.0)
+                         + cv_ * (us_f * us_f * us_f), 0, h - 1)
             prof = np.bincount(yy.astype(np.int32), minlength=h)
             prof = np.convolve(prof.astype(np.float32),
                                np.ones(9) / 9, mode="same")
@@ -1668,6 +1684,17 @@ def extract_grid_cells(warped, rows=5, columns=5, min_junk_pitch=0):
         quad = float(max(fquad, key=lambda v_: shear_score(shear, v_)))
         if abs(quad) < 4:
             quad = 0.0  # below noise; straight boundaries are fine
+
+        # Cubic term: real keystone from a rotated, tilted card is not
+        # symmetric — one edge sinks while the other barely moves
+        # (IMG_4948 cards 5/6 slicing number TOPS rightward). u^3 is odd,
+        # so it needs no recentring.
+        ccube = np.arange(-50, 50.1, 5)
+        c0 = max(ccube, key=lambda v_: shear_score(shear, quad, v_))
+        fcube = np.arange(c0 - 5, c0 + 5.01, 1)
+        cube = float(max(fcube, key=lambda v_: shear_score(shear, quad, v_)))
+        if abs(cube) < 4:
+            cube = 0.0
 
     col_rows = []
     col_xcent = []
@@ -1697,7 +1724,8 @@ def extract_grid_cells(warped, rows=5, columns=5, min_junk_pitch=0):
             # column's centre.
             u_c = (col_xcent[c] - xc) / hw
             yc = int(round(yp + shear * (col_xcent[c] - xc)
-                           + quad * (u_c * u_c - 1.0 / 3.0)))
+                           + quad * (u_c * u_c - 1.0 / 3.0)
+                           + cube * (u_c * u_c * u_c)))
             yc = int(np.clip(yc, 0, h - 1))
             # Micro-snap only across a clean whitespace run — wide enough
             # to tidy the model, far too narrow to reach a digit gap.
