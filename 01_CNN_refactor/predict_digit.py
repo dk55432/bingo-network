@@ -65,19 +65,20 @@ model.load_state_dict(
 model.eval()
 
 
-filename = sys.argv[1]
+if __name__ == "__main__":
+    filename = sys.argv[1]
 
-image = Image.open(filename)
+    image = Image.open(filename)
 
-image_tensor = test_transform(image)
-image_tensor = image_tensor.unsqueeze(0).to(device)
+    image_tensor = test_transform(image)
+    image_tensor = image_tensor.unsqueeze(0).to(device)
 
-with torch.no_grad():
-    outputs = model(image_tensor)
-    probabilities = torch.softmax(outputs, dim=1)
+    with torch.no_grad():
+        outputs = model(image_tensor)
+        probabilities = torch.softmax(outputs, dim=1)
 
-    confidence, prediction = probabilities.max(dim=1)
+        confidence, prediction = probabilities.max(dim=1)
 
-print("File:", filename)
-print("Predicted digit:", prediction.item())
-print("Confidence:", f"{confidence.item():.3f}")
+    print("File:", filename)
+    print("Predicted digit:", prediction.item())
+    print("Confidence:", f"{confidence.item():.3f}")
