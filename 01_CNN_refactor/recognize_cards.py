@@ -259,26 +259,41 @@ def classify_digit(model, glyph):
     return int(pred.item()), float(conf.item())
 
 
+def _predict_from_raw(model, cell_gray):
+    """Predict a bingo number from a raw cell image using the digit CNN.
+
+    Tries both full-cell and left/right split, returns whichever has
+    higher confidence. Matches the training data convention where
+    two-digit numbers were split left/right.
+    """
+    h, w = cell_gray.shape
+    pil = Image.fromarray(cell_gray)
+
+    t_full = test_transform(pil).unsqueeze(0).to(_DEVICE)
+    t_left = test_transform(pil.crop((0, 0, w // 2, h))).unsqueeze(0).to(_DEVICE)
+    t_right = test_transform(pil.crop((w // 2, 0, w, h))).unsqueeze(0).to(_DEVICE)
+
+    with torch.no_grad():
+        p_full = torch.softmax(model(t_full), dim=1)[0]
+        p_left = torch.softmax(model(t_left), dim=1)[0]
+        p_right = torch.softmax(model(t_right), dim=1)[0]
+
+    full_pred = p_full.argmax().item()
+    full_conf = p_full.max().item()
+
+    left_pred = p_left.argmax().item()
+    right_pred = p_right.argmax().item()
+    two_conf = (p_left.max().item() + p_right.max().item()) / 2
+
+    if full_conf >= two_conf or left_pred == 0:
+        return full_pred, full_conf, 1
+    return 10 * left_pred + right_pred, two_conf, 2
+
+
 def read_cell(model, cell):
-    """
-    Read one cell. Returns (number_or_None, mean_confidence, n_glyphs).
-    """
-    glyphs = split_digits(cell)
-    if not glyphs:
-        return None, 0.0, 0
-    reads = [classify_digit(model, g) for g in glyphs]
-    reads = [rc for rc in reads if rc[0] >= 0]  # drop empty renders
-    if not reads:
-        return None, 0.0, len(glyphs)
-    conf = float(np.mean([c for _, c in reads]))
-    if len(reads) == 1:
-        return reads[0][0], conf, 1
-    # Two glyphs: tens digit cannot be 0 ('01'-'09' would have been one
-    # glyph); anything odd means we mis-split and say so via None.
-    d1, d2 = reads[0][0], reads[1][0]
-    if d1 == 0:
-        return None, conf, 2
-    return 10 * d1 + d2, conf, 2
+    """Read one cell using raw cell resize. Returns (number, confidence, n_glyphs)."""
+    gray = cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY) if cell.ndim == 3 else cell
+    return _predict_from_raw(model, gray)
 
 
 def read_card(card):

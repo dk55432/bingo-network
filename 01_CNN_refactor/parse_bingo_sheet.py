@@ -2308,7 +2308,28 @@ def extract_card_grids(image):
     debug overlays.
     """
     labels, groups = find_card_components(image)
-    groups.sort(key=lambda g_: g_["bbox"][1])
+    # Number cards the way a person reads the sheet: down the left
+    # column (1,2,3), then down the right (4,5,6). Sorting purely by y
+    # interleaves the columns on a 2x3 sheet, so cluster by x-centre
+    # into columns first. A single-column sheet degenerates to the old
+    # behaviour.
+    if len(groups) > 1:
+        med_w = float(np.median([g["bbox"][2] for g in groups]))
+        order = sorted(groups,
+                       key=lambda g_: g_["bbox"][0] + g_["bbox"][2] / 2)
+        cols = [[order[0]]]
+        for g_ in order[1:]:
+            prev = cols[-1][-1]
+            gx = g_["bbox"][0] + g_["bbox"][2] / 2
+            px = prev["bbox"][0] + prev["bbox"][2] / 2
+            if gx - px > 0.6 * med_w:
+                cols.append([g_])
+            else:
+                cols[-1].append(g_)
+        groups = [g_ for col in cols for g_ in
+                  sorted(col, key=lambda g_: g_["bbox"][1])]
+    else:
+        groups.sort(key=lambda g_: g_["bbox"][1])
     H, W = image.shape[:2]
     cards = []
     for grp in groups:

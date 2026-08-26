@@ -24,3 +24,9 @@ text
 
 Then close and reopen the Python file, or reload VSCode.
 
+------------------------------------------------------------
+
+To view an image file from the command line (on a Mac):
+open -a Preview ./IMG_4904.jpg
+
+

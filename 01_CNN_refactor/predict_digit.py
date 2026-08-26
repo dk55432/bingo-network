@@ -12,25 +12,24 @@ class DigitClassifier(nn.Module):
         super().__init__()
 
         self.features = nn.Sequential(
-            nn.Conv2d(1, 32, kernel_size=3, padding=1),
+            nn.Conv2d(1, 16, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.MaxPool2d(2),
 
             nn.Conv2d(32, 64, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.MaxPool2d(2),
-
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2)
+            nn.AdaptiveAvgPool2d((3, 3)),
         )
 
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(128 * 8 * 8, 128),
+            nn.Linear(64 * 9, 64),
             nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(128, 10)
+            nn.Linear(64, 10),
         )
 
     def forward(self, x):
@@ -40,7 +39,7 @@ class DigitClassifier(nn.Module):
 
 test_transform = transforms.Compose([
     transforms.Grayscale(num_output_channels=1),
-    transforms.Resize((64, 64)),
+    transforms.Resize((28, 28)),
     transforms.ToTensor(),
     transforms.Normalize(
         mean=[0.5],
