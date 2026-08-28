@@ -1,15 +1,17 @@
 """
-End-to-end card reader: photo -> cells -> digit glyphs -> numbers.
+End-to-end card reader: photo or scan -> cells -> digit glyphs -> numbers.
 
-Attaches the trained DigitClassifier (predict_digit.py /
-digit_classifier.pth) to the cell extraction of parse_bingo_sheet.py.
-The cell -> glyph splitter ports find_digit_components from
-00_card_scan_refactor/extract_digits.py, the same logic that built
-digits/train, so the classifier sees input shaped like its training
-data.
+Photo path (small card crops, possibly marked with green daub / red pens):
+    extract_card_grids (parse_bingo_sheet) -> extract_grid_cells -> the
+    component/valley splitter below, with marker-ink exclusion.
+Scan path (30 flatbed sheets, 3 stacked cards each, teal BINGO headers):
+    sheet_to_cells (extract_scan_cells) -> clean (build_scan_dataset) -> the
+    component reader of evaluate_scan_cells, which also enforces bingo
+    column ranges on fused-digit splits.
 
-Bingo column ranges (B1-15, I16-30, N31-45, G46-60, O61-75) give a free
-sanity check on every recognized card.
+Both attach the trained DigitClassifier (digit_classifier.pth). Bingo
+column ranges (B1-15, I16-30, N31-45, G46-60, O61-75) give a free sanity
+check on every recognized card.
 """
 
 from pathlib import Path
@@ -26,6 +28,9 @@ from parse_bingo_sheet import (
     _deskew_header,
     extract_grid_cells,
 )
+from extract_scan_cells import sheet_to_cells
+from build_scan_dataset import clean
+from evaluate_scan_cells import read_cell as scan_read_cell
 
 COLUMN_RANGES = [(1, 15), (16, 30), (31, 45), (46, 60), (61, 75)]
 
@@ -339,15 +344,66 @@ def read_card(card):
     return result
 
 
+def read_scan_sheet(image):
+    """
+    Recognize one flatbed scan sheet (3 stacked cards).
+
+    Returns a list of result dicts (one per detected card), each shaped
+    like the photo path's read_card output so format_card works on both.
+    Returns None when the image is not a recognizable scan sheet.
+    """
+    cells = sheet_to_cells(image)
+    if not cells:
+        return None
+
+    by_card = {}
+    model = load_model()
+    for cid, r, c, cell in cells:
+        if r == 2 and c == 2:      # center is the printed FREE square
+            by_card.setdefault(cid, {})[(r, c)] = (None, 0.0, 0)
+            continue
+        gray = clean(cell)
+        num, conf, ng = scan_read_cell(model, gray, COLUMN_RANGES[c])
+        by_card.setdefault(cid, {})[(r, c)] = (num, conf, ng)
+
+    results = []
+    for cid in sorted(by_card):
+        numbers = [[None] * 5 for _ in range(5)]
+        confidences = [[0.0] * 5 for _ in range(5)]
+        violations = []
+        for (r, c), (num, conf, _) in by_card[cid].items():
+            numbers[r][c] = num
+            confidences[r][c] = conf
+            if r == 2 and c == 2:
+                continue          # FREE square: no number is correct
+            if num is None:
+                violations.append(f"r{r + 1}c{c + 1}: no digits")
+            elif not (COLUMN_RANGES[c][0] <= num <= COLUMN_RANGES[c][1]):
+                violations.append(
+                    f"r{r + 1}c{c + 1}: {num} outside {COLUMN_RANGES[c]}")
+        results.append({
+            "fitted": True,
+            "numbers": numbers,
+            "confidences": confidences,
+            "violations": violations,
+        })
+    return results
+
+
 def format_card(result):
     if not result["fitted"]:
         return "  (grid fit failed)"
     rows = []
     for r in range(5):
-        rows.append("  " + " ".join(
-            f"{result['numbers'][r][c]:>2}"
-            if result["numbers"][r][c] is not None else " ."
-            for c in range(5)))
+        row = []
+        for c in range(5):
+            if r == 2 and c == 2:
+                row.append("FREE")
+            elif result["numbers"][r][c] is not None:
+                row.append(f"{result['numbers'][r][c]:>2}")
+            else:
+                row.append(" .")
+        rows.append("  " + " ".join(row))
     mean_conf = float(np.mean([result["confidences"][r][c]
                                for r in range(5) for c in range(5)
                                if result["numbers"][r][c] is not None]))
@@ -365,7 +421,8 @@ def main():
     for t in targets:
         p = Path(t)
         if p.is_dir():
-            paths += sorted(p.glob("*.jpeg")) + sorted(p.glob("*.jpg"))
+            paths += (sorted(p.glob("*.jpeg")) + sorted(p.glob("*.jpg"))
+                      + sorted(p.glob("*.png")))
         else:
             paths.append(p)
 
@@ -373,24 +430,50 @@ def main():
     for path in paths:
         image = cv2.imread(str(path))
         if image is None:
+            print(f"{path.stem}: unreadable")
             continue
+
+        # Photo path first: extract_card_grids finds leveled card crops and
+        # returns [] on flatbed scans, so a scan falls through cleanly.
         try:
             cards, _, _ = __import__(
                 "parse_bingo_sheet").extract_card_grids(image)
         except Exception as exc:  # noqa: BLE001
-            print(f"{path.stem}: detection failed ({exc})")
+            cards = []
+            photo_err = str(exc)
+        else:
+            photo_err = None
+
+        if cards:
+            print(f"{path.stem} [photo]: {len(cards)} card(s)")
+            for i, card in enumerate(cards):
+                res = read_card(card)
+                total_cards += 1
+                mark = ""
+                if res["fitted"] and res["violations"]:
+                    flagged += 1
+                    mark = f"  [{len(res['violations'])} flags]"
+                print(f"  card_{i + 1}{mark}")
+                if res["fitted"]:
+                    print(format_card(res))
             continue
-        print(f"{path.stem}: {len(cards)} card(s)")
-        for i, card in enumerate(cards):
-            res = read_card(card)
-            total_cards += 1
-            mark = ""
-            if res["fitted"] and res["violations"]:
-                flagged += 1
-                mark = f"  [{len(res['violations'])} flags]"
-            print(f"  card_{i + 1}{mark}")
-            if res["fitted"]:
+
+        # Scan path: 3 stacked cards with teal BINGO headers.
+        scan_results = read_scan_sheet(image)
+        if scan_results:
+            print(f"{path.stem} [scan]: {len(scan_results)} card(s)")
+            for i, res in enumerate(scan_results):
+                total_cards += 1
+                mark = ""
+                if res["fitted"] and res["violations"]:
+                    flagged += 1
+                    mark = f"  [{len(res['violations'])} flags]"
+                print(f"  card_{i + 1}{mark}")
                 print(format_card(res))
+            continue
+
+        print(f"{path.stem}: detection failed" +
+              (f" ({photo_err})" if photo_err else ""))
     print(f"\n{total_cards} cards, {flagged} with flags")
 
 

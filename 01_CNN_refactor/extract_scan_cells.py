@@ -1,0 +1,209 @@
+"""Extract 25 bingo cells from flatbed scan sheets (3 cards per sheet).
+
+Scan layout (validated across sheets 001-003):
+- portrait sheet, 3 cards stacked vertically
+- each card: teal BINGO header band (~35% teal rows), then 5x5 number grid
+- grid: 5 number rows, interior horizontal grid lines at ~192px pitch
+- grid lines are thin dark lines spanning the card width
+- the 3rd card may be cut at the bottom of the scan
+
+Pipeline per sheet:
+1. detect full-width dark rows -> candidate horizontal grid lines across sheet
+2. detect teal header bands -> card tops (row 1 top boundary)
+3. for each card, group the horizontal lines into the 5 rows
+4. detect vertical grid columns within the card's row span
+5. extract 5x5 cells, save as JPEG
+"""
+
+import argparse, os
+import cv2
+import numpy as np
+
+H_LINE_FRAC = 0.55      # horizontal grid line: dark run >= 55% of width
+V_LINE_FRAC = 0.45      # vertical grid line: dark run >= 45% of card height
+ROW_PITCH = 192
+INSET = 5               # px to trim from each cell edge (exclude grid lines)
+
+
+def max_run(v):
+    nz = v > 0
+    best = cur = 0
+    for b in nz:
+        cur = cur + 1 if b else 0
+        best = max(best, cur)
+    return best
+
+
+def cluster(vals, sep=10):
+    out = []
+    for v in vals:
+        if out and v - out[-1][-1] <= sep:
+            out[-1].append(v)
+        else:
+            out.append([v])
+    return [int(np.mean(c)) for c in out]
+
+
+def find_teal_bands(img):
+    """Return list of (start, end) y ranges of teal header bands.
+
+    These sheets have a teal (hue ~100) BINGO header band per card; the
+    number rows below have low saturation, so a high per-row saturation
+    fraction isolates the header bands. The band END is the card's row-1 top.
+    """
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    h = hsv[:, :, 0].astype(int)
+    s = hsv[:, :, 1].astype(int)
+    v = hsv[:, :, 2].astype(int)
+    teal = (h >= 90) & (h <= 125) & (s > 60) & (v > 100)
+    rowcnt = teal.mean(axis=1)
+    rows = [y for y in range(len(rowcnt)) if rowcnt[y] > 0.20]
+    # split into contiguous runs of teal rows
+    runs = []
+    for y in rows:
+        if runs and y - runs[-1][-1] <= 1:
+            runs[-1].append(y)
+        else:
+            runs.append([y])
+    bands = []
+    for r in runs:
+        if len(r) >= 15:  # ignore isolated teal specks
+            bands.append((r[0], r[-1]))
+    return bands
+
+
+def detect_hlines(bin_img):
+    H, W = bin_img.shape
+    found = [y for y in range(H) if max_run(bin_img[y, :]) >= H_LINE_FRAC * W]
+    return cluster(found, sep=6)
+
+
+def detect_vlines(bin_img, y0, y1):
+    ch = y1 - y0
+    if ch <= 0:
+        return []
+    found = [x for x in range(bin_img.shape[1])
+             if max_run(bin_img[y0:y1, x]) >= V_LINE_FRAC * ch]
+    return cluster(found, sep=6)
+
+
+def pick_columns(vlines, width=None):
+    """Choose 6 column boundaries (borders + 4 interior) from candidate vlines.
+
+    The interior grid columns are strong and ~225px apart; outer borders are
+    faint. Strategy: find the 4 consecutive candidates with the most regular
+    ~225px spacing that sit in the card's mid-width (interior columns live
+    well inside the page), then extrapolate borders at one pitch either side.
+    """
+    v = sorted(vlines)
+    if not v:
+        return None
+    pitch = 225.0
+    cand = np.diff(v)
+    if len(cand) >= 3:
+        med = float(np.median(cand))
+        if 190 <= med <= 260:
+            pitch = med
+
+    lo = 0.10 * (width or 1257)
+    hi = 0.92 * (width or 1257)
+
+    best = None
+    best_dev = None
+    for start in range(0, max(1, len(v) - 3)):
+        sub = v[start:start + 4]
+        if sub[0] < lo or sub[-1] > hi:
+            continue
+        g = np.diff(sub)
+        dev = float(np.std(g - pitch))
+        if best_dev is None or dev < best_dev:
+            best_dev = dev
+            best = sub
+    if best is None:
+        return None
+    interior = best
+    left = interior[0] - pitch
+    right = interior[-1] + pitch
+    # if a detected candidate is very close to the extrapolated border, use it
+    for cand_x in v:
+        if 0 <= cand_x <= left + 0.30 * pitch:
+            left = cand_x
+        if right - 0.30 * pitch <= cand_x:
+            right = cand_x
+    return [int(left)] + list(interior) + [int(right)]
+
+
+def sheet_to_cells(img, verbose=False):
+    """Return list of (card_id, row, col, cell_rgb_image)."""
+    g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    bin_img = (g < 190).astype(np.uint8)
+    H, W = img.shape[:2]
+
+    hlines = detect_hlines(bin_img)
+    teal_bands = find_teal_bands(img)
+    if verbose:
+        print(f"    teal bands: {teal_bands}")
+        print(f"    hlines: {hlines}")
+
+    cards = []
+    for (ts, te) in teal_bands:
+        # row-1 top = teal band end; rows 1..5 separated by the h-lines after
+        own = [y for y in hlines if y > te + 5][:5]
+        if not own:
+            continue
+        row_b = [te] + own
+        # fill remainder (e.g. last card cut off at scan bottom)
+        while len(row_b) < 6:
+            row_b.append(row_b[-1] + ROW_PITCH)
+        cards.append(row_b[:6])
+        if verbose:
+            print(f"    card rows: {row_b[:6]}")
+
+    cells_out = []
+    for cid, row_b in enumerate(cards, 1):
+        mid_y0 = row_b[0]
+        mid_y1 = row_b[5]
+        vlines = detect_vlines(bin_img, mid_y0, mid_y1)
+        vr = pick_columns(vlines)
+        if vr is None:
+            if verbose:
+                print(f"    card{cid}: no cols from {vlines}, SKIP")
+            continue
+        if verbose:
+            print(f"    card{cid} cols: {vr}")
+
+        for r in range(5):
+            for c in range(5):
+                yA, yB = row_b[r] + INSET, row_b[r + 1] - INSET
+                xA, xB = vr[c] + INSET, vr[c + 1] - INSET
+                cell = img[yA:yB, xA:xB]
+                if cell.size == 0:
+                    continue
+                cells_out.append((cid, r, c, cell))
+    return cells_out
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("sheets", nargs="+")
+    ap.add_argument("--out", required=True)
+    args = ap.parse_args()
+
+    os.makedirs(args.out, exist_ok=True)
+    total = 0
+    for sh in args.sheets:
+        base = os.path.basename(sh)[:-4]
+        img = cv2.imread(sh)
+        if img is None:
+            print(f"SKIP {sh}: unreadable")
+            continue
+        print(f"{base}:")
+        for cid, r, c, cell in sheet_to_cells(img, verbose=True):
+            name = f"{base}_card{cid}_r{r}c{c}.jpg"
+            cv2.imwrite(os.path.join(args.out, name), cell)
+            total += 1
+    print(f"DONE {total} cells -> {args.out}")
+
+
+if __name__ == "__main__":
+    main()
