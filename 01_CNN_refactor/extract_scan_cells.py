@@ -51,14 +51,79 @@ def find_teal_bands(img):
     number rows below have low saturation, so a high per-row saturation
     fraction isolates the header bands. The band END is the card's row-1 top.
     """
+    return _mask_bands(_band_mask(img, hrange=(90, 125), s_min=60))
+
+
+def find_header_bands(img):
+    """find_teal_bands, generalized to any header-band color.
+
+    Bingo sheet sets come in different print colors (teal/blue sheets,
+    orange sets, green, ...): each card has a saturated horizontal BINGO
+    banner and the number rows below are low-saturation.  Pick the color
+    family producing the tallest/plenty-within-band rows (teal first so
+    existing blue-sheet behavior is unchanged) and return its bands.
+    """
+    spec = _header_hue_spec(img)
+    if spec is None:
+        return []
+    hl, hh, s_min = spec
+    return _mask_bands(_band_mask(img, hrange=(hl, hh), s_min=s_min))
+
+
+# Candidate header print colors, teal first (original blue sheets).
+_BAND_FAMILIES = [
+    ((90, 125), 60),   # teal (original blue sheets)
+    ((125, 160), 60),  # mid blues
+    ((5, 30), 80),     # orange sets
+    ((30, 90), 60),    # greens / yellows
+    ((160, 180), 80),  # reds / magenta
+    ((0, 5), 80),      # reds across the hue wrap
+]
+
+
+def _header_hue_spec(img):
+    """Return the (h_low, h_high, s_min) of the sheet's header color, or
+    None if no sheet-like colored bands exist.  Whichever family yields
+    the highest _band_score wins; if none do, fall back to the image's
+    own dominant saturated hue so unseen print colors still work."""
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     h = hsv[:, :, 0].astype(int)
     s = hsv[:, :, 1].astype(int)
     v = hsv[:, :, 2].astype(int)
-    teal = (h >= 90) & (h <= 125) & (s > 60) & (v > 100)
-    rowcnt = teal.mean(axis=1)
+    best, best_score = None, -1
+    for hrange, s_min in _BAND_FAMILIES:
+        mask = _hue_in(h, *hrange) & (s > s_min) & (v > 100)
+        score = _band_score(_mask_bands(mask))
+        if score > best_score:
+            best_score, best = score, (hrange[0], hrange[1], s_min)
+    if best is not None and (best_score > 0 or best[0] == 90):
+        return best
+    sat = (s > 60) & (v > 100)
+    if sat.sum() < 0.01 * img.shape[0] * img.shape[1]:
+        return None
+    dom = int(np.bincount(h[sat].ravel()).argmax())
+    return ((dom - 20) % 180, (dom + 20) % 180, 60)
+
+
+def _hue_in(h, hl, hh):
+    if hl <= hh:
+        return (h >= hl) & (h <= hh)
+    return (h >= hl) | (h <= hh)
+
+
+def _band_mask(img, hrange, s_min):
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    h = hsv[:, :, 0].astype(int)
+    s = hsv[:, :, 1].astype(int)
+    v = hsv[:, :, 2].astype(int)
+    return _hue_in(h, *hrange) & (s > s_min) & (v > 100)
+
+
+def _mask_bands(mask):
+    """Rows where the band covers >20% of the width, grouped into
+    contiguous runs at least 15 rows tall, as (start, end) y ranges."""
+    rowcnt = mask.mean(axis=1)
     rows = [y for y in range(len(rowcnt)) if rowcnt[y] > 0.20]
-    # split into contiguous runs of teal rows
     runs = []
     for y in rows:
         if runs and y - runs[-1][-1] <= 1:
@@ -67,9 +132,13 @@ def find_teal_bands(img):
             runs.append([y])
     bands = []
     for r in runs:
-        if len(r) >= 15:  # ignore isolated teal specks
+        if len(r) >= 15:  # ignore isolated colored specks
             bands.append((r[0], r[-1]))
     return bands
+
+
+def _band_score(bands):
+    return sum(hi - lo for lo, hi in bands) + 1000 * len(bands)
 
 
 def detect_hlines(bin_img):

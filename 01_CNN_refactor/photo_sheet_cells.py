@@ -21,13 +21,17 @@ sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from pipeline import _cell_boundaries, find_grid_line_positions  # noqa: E402
-from extract_scan_cells import find_teal_bands, INSET  # noqa: E402
+from extract_scan_cells import (  # noqa: E402
+    INSET,
+    _header_hue_spec,
+    _hue_in,
+)
 
 
 def sheet_to_cells_photo(img, verbose=False, return_geometry=False):
     """Return list of (card_id, row, col, cell) with optional geometry,
     mirroring extract_scan_cells.sheet_to_cells's contract."""
-    bands = find_teal_bands(img)
+    bands = find_header_bands(img)
     if not bands:
         return []
     H, W = img.shape[:2]
@@ -70,12 +74,17 @@ def sheet_to_cells_photo(img, verbose=False, return_geometry=False):
 
 def teal_card_bboxes(img):
     """Return [(x0, y0, x1, y1)] per card header band, merged across hue
-    splits, sorted by y."""
+    splits, sorted by y.  Works for any sheet print color (the header
+    color is auto-detected, see _header_hue_spec)."""
+    spec = _header_hue_spec(img)
+    if spec is None:
+        return []
+    hl, hh, s_min = spec
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     h = hsv[:, :, 0].astype(int)
     s = hsv[:, :, 1].astype(int)
     v = hsv[:, :, 2].astype(int)
-    teal = (h >= 90) & (h <= 125) & (s > 60) & (v > 100)
+    teal = _hue_in(h, hl, hh) & (s > s_min) & (v > 100)
     rowcnt = teal.mean(axis=1)
     rows = [y for y in range(len(rowcnt)) if rowcnt[y] > 0.20]
     runs = []
