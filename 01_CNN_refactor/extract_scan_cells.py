@@ -83,20 +83,28 @@ _BAND_FAMILIES = [
 
 def _header_hue_spec(img):
     """Return the (h_low, h_high, s_min) of the sheet's header color, or
-    None if no sheet-like colored bands exist.  Whichever family yields
-    the highest _band_score wins; if none do, fall back to the image's
-    own dominant saturated hue so unseen print colors still work."""
+    None if no sheet-like colored bands exist.
+
+    Teal is the default and always wins when it yields any bands — the
+    original blue sheets must remain byte-for-byte identical.  Only when
+    teal finds nothing do we consider other print colors (orange sets,
+    etc.), picked by which family produces the most band-like rows; if no
+    family matches, fall back to the image's own dominant saturated hue so
+    unseen print colors still work."""
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     h = hsv[:, :, 0].astype(int)
     s = hsv[:, :, 1].astype(int)
     v = hsv[:, :, 2].astype(int)
+    teal_mask = _hue_in(h, 90, 125) & (s > 60) & (v > 100)
+    if _band_score(_mask_bands(teal_mask)) > 0:
+        return (90, 125, 60)
     best, best_score = None, -1
-    for hrange, s_min in _BAND_FAMILIES:
+    for hrange, s_min in _BAND_FAMILIES[1:]:
         mask = _hue_in(h, *hrange) & (s > s_min) & (v > 100)
         score = _band_score(_mask_bands(mask))
         if score > best_score:
             best_score, best = score, (hrange[0], hrange[1], s_min)
-    if best is not None and (best_score > 0 or best[0] == 90):
+    if best is not None and best_score > 0:
         return best
     sat = (s > 60) & (v > 100)
     if sat.sum() < 0.01 * img.shape[0] * img.shape[1]:
