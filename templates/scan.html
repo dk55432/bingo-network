@@ -565,6 +565,7 @@
           input.inputMode = "numeric";
           input.value = cellData.value ?? "";
           input.addEventListener("input", () => cellEl.classList.remove("flagged"));
+          input.addEventListener("focus", (e) => setTimeout(() => e.target.select(), 0));
           cellEl.appendChild(input);
         }
         rowEl.appendChild(cellEl);
