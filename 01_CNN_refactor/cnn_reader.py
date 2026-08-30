@@ -13,6 +13,7 @@ Column constraints (true for every bingo card):
 
 import io
 import json
+import os
 import re
 import sys
 import time
@@ -58,6 +59,66 @@ def _teal_hue_stats(bgr):
     return (float(np.median(h)),
             [float(np.percentile(h, 20)), float(np.percentile(h, 80))],
             float(np.median(s)), float(np.median(v)))
+
+
+def _sheet_quad(img):
+    """Locate the sheet's outer quadrilateral, or None if it can't be
+    trusted (no big bright region, or corners touching the frame edge —
+    meaning the page is cut off and warp would be wrong)."""
+    H, W = img.shape[:2]
+    gray = cv2.cvtColor(cv2.GaussianBlur(img, (5, 5), 0),
+                        cv2.COLOR_BGR2GRAY)
+    thr = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+    thr = cv2.morphologyEx(thr, cv2.MORPH_CLOSE, np.ones((31, 31), np.uint8))
+    conts, _ = cv2.findContours(thr, cv2.RETR_EXTERNAL,
+                                cv2.CHAIN_APPROX_SIMPLE)
+    if not conts:
+        return None
+    big = max(conts, key=cv2.contourArea)
+    if cv2.contourArea(big) < 0.10 * H * W:
+        return None
+    peri = cv2.arcLength(big, True)
+    poly = cv2.approxPolyDP(big, 0.02 * peri, True)
+    if len(poly) < 4:
+        hull = cv2.convexHull(poly)
+        poly = cv2.approxPolyDP(hull, 0.02 * cv2.arcLength(hull, True), True)
+    if len(poly) < 4:
+        return None
+    pts = poly.reshape(-1, 2).astype(np.float32)
+    s = pts.sum(axis=1)
+    d = pts[:, 1] - pts[:, 0]
+    tl, tr, br, bl = pts[np.argmin(s)], pts[np.argmax(d)], \
+        pts[np.argmax(s)], pts[np.argmin(d)]
+    if (tl[0] < 8 or tl[1] < 4 or br[0] > W - 8 or br[1] > H - 4
+            or tr[0] > W - 8 or tr[1] < 4 or bl[0] < 8 or bl[1] > H - 4):
+        return None
+    return np.array([tl, tr, br, bl], dtype=np.float32)
+
+
+def _warp_sheet(img):
+    """Perspective-correct the whole sheet to the scan's proportions
+    (1257:3475) when it is noticeably trapezoidal (camera pitched).  Near-
+    frontal photos are untouched.  Only active with CNN_WARP=1: the model
+    was trained on the un-warped geometry, so warping only helps severely
+    pitched real-world shots and must be opted into."""
+    if os.environ.get("CNN_WARP") != "1":
+        return img, False
+    q = _sheet_quad(img)
+    if q is None:
+        return img, False
+    tl, tr, br, bl = q
+    wtop = np.hypot(tr[0] - tl[0], tr[1] - tl[1])
+    wbot = np.hypot(br[0] - bl[0], br[1] - bl[1])
+    hl = np.hypot(bl[0] - tl[0], bl[1] - tl[1])
+    hr = np.hypot(br[0] - tr[0], br[1] - tr[1])
+    dev = max(abs(wtop - wbot), abs(hl - hr)) / max(wtop, hl)
+    if dev < 0.04:
+        return img, False
+    tw = int(round(max(wtop, wbot)))
+    th = int(round(tw * 2.765))
+    dst = np.array([[0, 0], [tw, 0], [tw, th], [0, th]], dtype=np.float32)
+    M = cv2.getPerspectiveTransform(q, dst)
+    return cv2.warpPerspective(img, M, (tw, th)), True
 
 
 def _normalize(img):
@@ -270,6 +331,7 @@ def _read_sheet(model, sheet_bgr):
     /tmp/cnn_reader_debug (with per-card ink/confidence stats) so any
     misread can be diagnosed after the fact.
     """
+    sheet_bgr, warped = _warp_sheet(sheet_bgr)
     by_card, bboxes = cells_from(sheet_bgr)
     ts = int(time.time())
     dbg = Path("/tmp/cnn_reader_debug")
@@ -320,7 +382,8 @@ def _read_sheet(model, sheet_bgr):
 
     return {"cards": cards, "debug": {
         "dump_in": str(dbg / f"in_{ts}.png"),
-        "dump_overlay": str(dbg / f"overlay_{ts}.png")}}
+        "dump_overlay": str(dbg / f"overlay_{ts}.png"),
+        "warped": bool(warped)}}
 
 
 if __name__ == "__main__":
