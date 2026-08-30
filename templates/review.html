@@ -190,7 +190,8 @@
       const res = await fetch(`${API_BASE}/scan-card`, { method: "POST", body: formData });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        throw new Error(err.detail || "Scan failed");
+        if (err.detail?.debug) console.warn("scan debug:", err.detail.debug);
+        throw new Error(err.detail?.error || err.detail || "Scan failed");
       }
       const data = await res.json();
       renderGrid(data.grid);
