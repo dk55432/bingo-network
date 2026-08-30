@@ -149,7 +149,9 @@ async def scan_card(file: UploadFile, corners: Optional[str] = Form(None)):
         cr = _cnn_module()
         result = cr.read_sheet_bytes(_cnn_model(), file_bytes)
         if result.get("error"):
-            raise HTTPException(status_code=422, detail=result["error"])
+            raise HTTPException(
+                status_code=422,
+                detail={"error": result["error"], "debug": result.get("debug", {})})
         return {"cards": result["cards"]}
 
     try:

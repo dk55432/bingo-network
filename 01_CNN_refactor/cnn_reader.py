@@ -15,6 +15,7 @@ import io
 import json
 import re
 import sys
+import time
 from pathlib import Path
 
 import cv2
@@ -45,6 +46,18 @@ cell_transform = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize((0.5,), (0.5,)),
 ])
+
+
+def _teal_hue_stats(bgr):
+    """Quick hue/sat/val summary to diagnose why bands weren't found."""
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    h = hsv[:, :, 0].ravel()
+    s = hsv[:, :, 1].ravel()
+    v = hsv[:, :, 2].ravel()
+    h[h > 179] = 0
+    return (float(np.median(h)),
+            [float(np.percentile(h, 20)), float(np.percentile(h, 80))],
+            float(np.median(s)), float(np.median(v)))
 
 
 def _normalize(img):
@@ -117,12 +130,16 @@ def load_photo_bytes(data):
 
 
 def cells_from(sheet_bgr):
-    """Full-sheet BGR (normalized by caller) -> {cid: {(r, c): cell}}."""
-    items = photo_sheet_cells.sheet_to_cells_teal(sheet_bgr)
+    """Full-sheet BGR (normalized by caller) -> {cid: {(r, c): cell}} and
+    {cid: {(r, c): (xA,yA,xB,yB)}}."""
+    items = photo_sheet_cells.sheet_to_cells_teal(
+        sheet_bgr, return_geometry=True)
     by = {}
-    for cid, r, c, cell in items:
+    boxes = {}
+    for cid, r, c, cell, box in items:
         by.setdefault(cid, {})[(r, c)] = cell
-    return by
+        boxes.setdefault(cid, {})[(r, c)] = box
+    return by, boxes
 
 
 def cell_logits(model, cell_bgr):
@@ -214,19 +231,96 @@ def read_sheet_path(model, path):
         Path(path).read_bytes())))
 
 
+def _structure_ok(bboxes):
+    """Validate the detected card layout looks like a real sheet.
+
+    Accepts a single card (1 teal band) or a full 3-card sheet whose
+    headers are near-equal pitch and width.  Rejects ambiguous layouts
+    (extra bands, wildly uneven spacing) so the reader reports a retake
+    error instead of emitting garbage grids.
+    """
+    n = len(bboxes)
+    if n == 0:
+        return False, "no teal bands detected"
+    if n == 1:
+        return True, ""
+    if n > 3:
+        return False, (f"detected {n} cards, expected 1 or 3 - the photo "
+                       "shows extra teal regions (other sheets in frame?)")
+    tops = [min(v[1] for v in cell_boxes.values())
+            for cell_boxes in bboxes.values()]
+    widths = [max(v[2] for v in cell_boxes.values())
+              - min(v[0] for v in cell_boxes.values())
+              for cell_boxes in bboxes.values()]
+    pitches = [tops[i] - tops[i - 1] for i in range(1, n)]
+    wmax = max(widths)
+    pitch_ok = (max(pitches) - min(pitches)) <= 0.28 * max(pitches)
+    width_ok = min(widths) >= 0.45 * wmax
+    if not (pitch_ok and width_ok):
+        return False, (f"card layout is uneven (pitches {pitches}, widths "
+                       f"{widths}) - retake flat with the whole sheet in "
+                       "frame")
+    return True, ""
+
+
 def _read_sheet(model, sheet_bgr):
-    """sheet_bgr (normalized full-sheet BGR) -> /scan-card payload."""
-    by_card = cells_from(sheet_bgr)
+    """sheet_bgr (normalized full-sheet BGR) -> /scan-card payload.
+
+    Always dumps the normalized input + a cell-box overlay to
+    /tmp/cnn_reader_debug (with per-card ink/confidence stats) so any
+    misread can be diagnosed after the fact.
+    """
+    by_card, bboxes = cells_from(sheet_bgr)
+    ts = int(time.time())
+    dbg = Path("/tmp/cnn_reader_debug")
+    dbg.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(dbg / f"in_{ts}.png"), sheet_bgr)
+    overlay = sheet_bgr.copy()
+    for cid, cells in bboxes.items():
+        for (r, c), box in cells.items():
+            cv2.rectangle(overlay, (box[0], box[1]), (box[2], box[3]),
+                          (0, 220, 0), 2)
+    cv2.imwrite(str(dbg / f"overlay_{ts}.png"), overlay)
+    ok, msg = _structure_ok(bboxes)
+    if not ok:
+        hue = _teal_hue_stats(sheet_bgr)
+        return {"cards": [], "error": msg, "debug": {
+            "dump_in": str(dbg / f"in_{ts}.png"),
+            "dump_overlay": str(dbg / f"overlay_{ts}.png"),
+            "bands": sorted({v[1] for cell_boxes in bboxes.values()
+                             for v in cell_boxes.values()}) if bboxes else [],
+            "hue_med": round(float(hue[0])),
+            "hue_pct20_80": [round(float(x), 1) for x in hue[1]],
+            "sat_med": round(float(hue[2])),
+            "val_med": round(float(hue[3]))}}
     if not by_card:
-        return {"cards": [], "error": "no teal bands detected"}
+        hue = _teal_hue_stats(sheet_bgr)
+        return {"cards": [], "error": "no teal bands detected", "debug": {
+            "dump_in": str(dbg / f"in_{ts}.png"),
+            "dump_overlay": str(dbg / f"overlay_{ts}.png"),
+            "hue_med": round(float(hue[0])),
+            "hue_pct20_80": [round(float(x), 1) for x in hue[1]],
+            "sat_med": round(float(hue[2])),
+            "val_med": round(float(hue[3]))}}
+
     cards = []
     for cid in sorted(by_card):
         lgrid = {}
         for (r, c), cell in by_card[cid].items():
             lgrid[(r, c)] = cell_logits(model, cell)
         numbers, confs = decode_card(lgrid)
-        cards.append(card_result(numbers, confs))
-    return {"cards": cards}
+        result = card_result(numbers, confs)
+        mean_conf = np.mean([confs[r][c] for r in range(5) for c in range(5)
+                             if (r, c) != FREE])
+        min_conf = min(confs[r][c] for r in range(5) for c in range(5)
+                       if (r, c) != FREE)
+        if mean_conf < 0.25 or min_conf < 0.08:
+            result["needs_review"] = True
+        cards.append(result)
+
+    return {"cards": cards, "debug": {
+        "dump_in": str(dbg / f"in_{ts}.png"),
+        "dump_overlay": str(dbg / f"overlay_{ts}.png")}}
 
 
 if __name__ == "__main__":
