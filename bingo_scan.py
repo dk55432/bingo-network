@@ -19,12 +19,20 @@ Flow:
 Requirements:
   pip install fastapi python-multipart opencv-python-headless pytesseract numpy
 
+  Optional CNN reader (READER=cnn): additionally needs torch, torchvision,
+  scipy, pillow. The CNN reader lives in 01_CNN_refactor/cnn_reader.py and
+  uses the whole-cell model cell_classifier_phone.pth (column-constrained
+  decode, ~64% cell-accurate on held-out photos vs ~23% for Tesseract).
+
   You also need the Tesseract binary itself installed, e.g.:
     Debian/Ubuntu: apt-get install -y tesseract-ocr
     macOS:         brew install tesseract
 """
 
 import json
+import os
+import sys
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -101,12 +109,49 @@ def _ocr_one_card(card_img) -> dict:
     return {"grid": results, "needs_review": needs_review}
 
 
+# The CNN reader lives in 01_CNN_refactor and needs torch; it is imported
+# lazily (and its model is cached) so the default Tesseract path stays
+# free of the heavy dependencies.
+_CNN_MODEL = None
+_CNN_RDIR = None
+
+
+def _cnn_module():
+    global _CNN_RDIR
+    rdir = Path(__file__).parent / "01_CNN_refactor"
+    if str(rdir) not in sys.path:
+        sys.path.insert(0, str(rdir))
+    _CNN_RDIR = rdir
+    import cnn_reader  # noqa: PLC0415
+    return cnn_reader
+
+
+def _cnn_model():
+    global _CNN_MODEL
+    if _CNN_MODEL is None:
+        _CNN_MODEL = _cnn_module().load_model()
+    return _CNN_MODEL
+
+
 @router.post("/scan-card")
 async def scan_card(file: UploadFile, corners: Optional[str] = Form(None)):
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Uploaded file must be an image")
 
     file_bytes = await file.read()
+
+    # Reader selection: READER=cnn uses the whole-cell CNN reader on the
+    # full photo (EXIF-correct + teal-band geometry + column-constrained
+    # decode).  READER=tesseract (default) keeps the old contour/corner ->
+    # Hough grid -> Tesseract path.  The CNN path ignores `corners`: it
+    # auto-detects full-sheet cards rather than a single warped card.
+    if os.environ.get("READER", "tesseract") == "cnn":
+        cr = _cnn_module()
+        result = cr.read_sheet_bytes(_cnn_model(), file_bytes)
+        if result.get("error"):
+            raise HTTPException(status_code=422, detail=result["error"])
+        return {"cards": result["cards"]}
+
     try:
         img = load_image(file_bytes)
     except ValueError as e:

@@ -133,8 +133,10 @@ def pick_columns(vlines, width=None):
     return [int(left)] + list(interior) + [int(right)]
 
 
-def sheet_to_cells(img, verbose=False):
-    """Return list of (card_id, row, col, cell_rgb_image)."""
+def sheet_to_cells(img, verbose=False, return_geometry=False):
+    """Return list of (card_id, row, col, cell_rgb_image), optionally
+    (card_id, row, col, cell_rgb_image, (x0, y0, x1, y1)) when
+    return_geometry=True so callers can draw debug overlays."""
     g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     bin_img = (g < 190).astype(np.uint8)
     H, W = img.shape[:2]
@@ -179,7 +181,10 @@ def sheet_to_cells(img, verbose=False):
                 cell = img[yA:yB, xA:xB]
                 if cell.size == 0:
                     continue
-                cells_out.append((cid, r, c, cell))
+                if return_geometry:
+                    cells_out.append((cid, r, c, cell, (xA, yA, xB, yB)))
+                else:
+                    cells_out.append((cid, r, c, cell))
     return cells_out
 
 
