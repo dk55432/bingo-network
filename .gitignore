@@ -17,6 +17,7 @@ scans/
 01_CNN_refactor/headers/
 01_CNN_refactor/cell_cache/
 01_CNN_refactor/pipeline_cells/
+01_CNN_refactor/learning_cells/
 dictation.txt
 01_CNN_refactor/digit_10class.pth
 01_CNN_refactor/digit_10class_prep.pth

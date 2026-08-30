@@ -365,6 +365,7 @@
   const cardEl = document.getElementById("card");
   const cardsContainer = document.getElementById("cardsContainer");
   const confirmBtn = document.getElementById("confirmBtn");
+  let lastScanId = null;
   const savedNote = document.getElementById("savedNote");
   const sessionListEl = document.getElementById("sessionList");
   const sessionCardsEl = document.getElementById("sessionCards");
@@ -514,6 +515,7 @@
         throw new Error(err.detail?.error || err.detail || "Scan failed");
       }
       const data = await res.json();
+      lastScanId = data.scan_id ?? null;
       renderCards(data.cards);
       const anyNeedsReview = data.cards.some((c) => c.needs_review);
       const cardWord = data.cards.length === 1 ? "card" : `${data.cards.length} cards`;
@@ -641,17 +643,13 @@
 
     try {
 
-      const msg = {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ game_id: gameId, player_id: playerId, grids }),
-      };
-      console.log(msg);
+      const body = JSON.stringify({ game_id: gameId, player_id: playerId, grids, scan_id: lastScanId });
+      console.log(body);
 
       const res = await fetch(`${API_BASE}/cards`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ game_id: gameId, player_id: playerId, grids }),
+        body,
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -677,6 +675,7 @@
   }
 
   function resetForNextScan() {
+    lastScanId = null;
     cardEl.style.display = "none";
     fileInput.value = "";
     statusEl.textContent = `Saved. ${scannedThisSession.length} card(s) scanned this session.`;

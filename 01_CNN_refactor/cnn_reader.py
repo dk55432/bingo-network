@@ -380,10 +380,37 @@ def _read_sheet(model, sheet_bgr):
             result["needs_review"] = True
         cards.append(result)
 
-    return {"cards": cards, "debug": {
+    if by_card:
+        _persist_pending_cells(sheet_bgr, by_card, ts)
+
+    return {"cards": cards, "scan_id": str(ts), "debug": {
         "dump_in": str(dbg / f"in_{ts}.png"),
         "dump_overlay": str(dbg / f"overlay_{ts}.png"),
         "warped": bool(warped)}}
+
+
+PENDING_DIR = Path("/tmp/phone_learning_pending")
+
+
+def _persist_pending_cells(sheet_bgr, by_card, scan_id):
+    """Save the raw cell crops for a successful read so a later user
+    confirmation (/cards POST with the same scan_id) can pair each cell
+    with its corrected number and grow the training set.  Grayscale
+    per-cell JPEGs, same stats as train_phone_cells.build writes.  Blank
+    cells are skipped so we never label empty crops."""
+    out = PENDING_DIR / str(scan_id)
+    out.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for cid in by_card:
+        for (r, c), cell in by_card[cid].items():
+            if (r, c) == FREE:
+                continue
+            g = cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY)
+            if (g < 150).mean() < 0.01:
+                continue
+            cv2.imwrite(str(out / f"c{cid}_r{r}c{c}.jpg"), g)
+            n += 1
+    return n
 
 
 if __name__ == "__main__":

@@ -30,7 +30,9 @@ Requirements:
 """
 
 import json
+import logging
 import os
+import shutil
 import sys
 from pathlib import Path
 from typing import Optional
@@ -55,7 +57,13 @@ from pipeline import (
 
 router = APIRouter()
 
+logger = logging.getLogger(__name__)
+
 COLUMN_LETTERS = ["B", "I", "N", "G", "O"]
+
+# Reviewed/corrected cells land here as labeled training images, one per
+# number (durable — this is the "memory" the CNN retrains on).
+LEARNING_DIR = Path(__file__).parent / "01_CNN_refactor" / "learning_cells"
 
 
 def numeric_grid_to_labeled_grid(grid: list[list[Optional[int]]]) -> list[list[str]]:
@@ -152,7 +160,7 @@ async def scan_card(file: UploadFile, corners: Optional[str] = Form(None)):
             raise HTTPException(
                 status_code=422,
                 detail={"error": result["error"], "debug": result.get("debug", {})})
-        return {"cards": result["cards"]}
+        return {"cards": result["cards"], "scan_id": result.get("scan_id")}
 
     try:
         img = load_image(file_bytes)
@@ -208,6 +216,57 @@ class ConfirmCardsRequest(BaseModel):
     # review/correction; None for each free space. A single strip scan
     # can produce several of these at once.
     grids: list[list[list[Optional[int]]]]
+    # Echoed back from /scan-card so the reader's saved cell crops (see
+    # cnn_reader._persist_pending_cells) can be paired with these
+    # confirmed grids to grow the CNN training data.
+    scan_id: Optional[str] = None
+
+
+def _save_learning_cells(payload: ConfirmCardsRequest) -> int:
+    """Pair the reader's saved cell crops (cnn_reader._persist_pending_cells,
+    keyed by scan_id) with the user's reviewed/corrected grids and write one
+    labeled training image per cell into LEARNING_DIR/<number>/.
+
+    Fully best-effort: a missing scan_id, a stale/missing pending dir, or a
+    pairing hiccup never fails the card save — the learning store just gets
+    nothing that round."""
+    if not payload.scan_id:
+        return 0
+    safe = "".join(ch for ch in str(payload.scan_id) if ch.isdigit())
+    if not safe:
+        return 0
+    pending = Path("/tmp/phone_learning_pending") / safe
+    if not pending.is_dir():
+        logger.info("learning: no pending cells for scan %s", safe)
+        return 0
+
+    n = 0
+    try:
+        for i, grid in enumerate(payload.grids):
+            cid = i + 1  # reader names pending crops c1..cN in card order
+            for row in range(GRID_SIZE):
+                for col in range(GRID_SIZE):
+                    if row == 2 and col == 2:
+                        continue
+                    val = grid[row][col]
+                    if val is None:
+                        continue
+                    src = pending / f"c{cid}_r{row}c{col}.jpg"
+                    if not src.is_file():
+                        continue
+                    out_dir = LEARNING_DIR / str(val)
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    dst = out_dir / f"{safe}_c{cid}_r{row}c{col}.jpg"
+                    if dst.exists():
+                        continue
+                    shutil.copyfile(src, dst)
+                    n += 1
+        shutil.rmtree(pending, ignore_errors=True)
+    except Exception:
+        logger.exception("learning: failed pairing crops for scan %s", safe)
+    if n:
+        logger.info("learning: captured %d confirmed cells from scan %s", n, safe)
+    return n
 
 
 @router.post("/cards")
@@ -244,6 +303,10 @@ async def confirm_cards(payload: ConfirmCardsRequest, request: Request):
         player.add_card(card)
         saved_cards.append(card)
     game.touch()
+
+    # Learning loop: only after the cards are saved successfully, pair the
+    # scanned cell crops with the confirmed grids and grow the training set.
+    _save_learning_cells(payload)
 
     # If this player has a live websocket connection open elsewhere (e.g. a
     # player.html tab left open on another device/tab while they scan on

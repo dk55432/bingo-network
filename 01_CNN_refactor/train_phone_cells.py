@@ -58,6 +58,17 @@ test_tf = transforms.Compose([
 ])
 
 
+class CellClassifier(DigitClassifier):
+    def __init__(self, ncls):
+        super().__init__()
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(64 * 9, 64),
+            nn.ReLU(),
+            nn.Linear(64, ncls),
+        )
+
+
 def build():
     import shutil
     shutil.rmtree(DST, ignore_errors=True)
@@ -109,16 +120,6 @@ def build():
 def main():
     build()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    class CellClassifier(DigitClassifier):
-        def __init__(self, ncls):
-            super().__init__()
-            self.classifier = nn.Sequential(
-                nn.Flatten(),
-                nn.Linear(64 * 9, 64),
-                nn.ReLU(),
-                nn.Linear(64, ncls),
-            )
 
     class TwoHeadClassifier(DigitClassifier):
         def __init__(self):
