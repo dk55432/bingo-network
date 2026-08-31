@@ -80,9 +80,9 @@ _BAND_FAMILIES = [
     ((90, 125), 60, 100, 0.20),  # teal (original blue sheets)
     ((125, 160), 60, 100, 0.20),  # mid blues
     ((5, 30), 80, 100, 0.15),     # orange sets
-    ((30, 90), 45, 45, 0.18),     # green sets (dimmer ink)
-    ((160, 180), 60, 80, 0.15),   # reds / magenta
-    ((0, 5), 60, 80, 0.15),       # reds across the hue wrap
+    ((30, 90), 45, 45, 0.18),     # green/yellow sets (dimmer ink)
+    ((0, 12), 40, 60, 0.10),      # pink/red sets (pale, low-ish sat)
+    ((160, 180), 60, 80, 0.15),   # magenta / purples
 ]
 
 
@@ -91,10 +91,14 @@ def _header_hue_spec(img):
     header color, or None if no sheet-like colored bands exist.
 
     Teal is the default and always wins when it yields any bands — the
-    original blue sheets must remain byte-for-byte identical.  Only when
-    teal finds nothing do we consider other print colors (orange/green
-    sets, etc.), picked by which family produces the most band-like rows;
-    if no family matches, fall back to the image's own dominant saturated
+    original blue sheets must remain byte-for-byte identical.  For the
+    other print colors (orange/green/pink sets, ...), prefer whichever
+    family produces a *structurally plausible* sheet: exactly three
+    evenly-spaced, similarly-sized bands (a full strip — the normal case),
+    else a single band (single-card photo).  Structural plausibility stops
+    unrelated colored objects in the frame (notebooks, mugs) from being
+    mistaken for card headers.  If nothing is plausible, fall back to the
+    highest raw band score, then to the image's own dominant saturated
     hue so unseen print colors still work."""
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     h = hsv[:, :, 0].astype(int)
@@ -103,10 +107,21 @@ def _header_hue_spec(img):
     teal_mask = _hue_in(h, 90, 125) & (s > 60) & (v > 100)
     if _band_score(_mask_bands(teal_mask)) > 0:
         return (90, 125, 60, 100, 0.20)
+    candidates = []
+    for idx, ((hl, hh), s_min, v_min, rowfrac) in enumerate(_BAND_FAMILIES[1:]):
+        bands = _mask_bands(_hue_in(h, hl, hh) & (s > s_min) & (v > v_min),
+                            rowfrac)
+        score, ok = _sheet_structure(bands)
+        if ok:
+            # (structure score, family priority, spec) — earlier families win ties
+            candidates.append((score, -idx, (hl, hh, s_min, v_min, rowfrac)))
+    if candidates:
+        return max(candidates)[2]
     best, best_score = None, -1
     for (hl, hh), s_min, v_min, rowfrac in _BAND_FAMILIES[1:]:
-        mask = _hue_in(h, hl, hh) & (s > s_min) & (v > v_min)
-        score = _band_score(_mask_bands(mask, rowfrac))
+        bands = _mask_bands(_hue_in(h, hl, hh) & (s > s_min) & (v > v_min),
+                            rowfrac)
+        score = _band_score(bands)
         if score > best_score:
             best_score, best = score, (hl, hh, s_min, v_min, rowfrac)
     if best is not None and best_score > 0:
@@ -116,6 +131,25 @@ def _header_hue_spec(img):
         return None
     dom = int(np.bincount(h[sat].ravel()).argmax())
     return ((dom - 20) % 180, (dom + 20) % 180, 45, 45, 0.12)
+
+
+def _sheet_structure(bands):
+    """Score a band layout's plausibility as a bingo sheet: 3 evenly
+    spaced, similarly sized bands (a full strip) is the strong case;
+    1 band (single card) is acceptable.  Returns (score, ok)."""
+    if not bands:
+        return 0.0, False
+    if len(bands) == 1:
+        return 10.0, True
+    if len(bands) == 3:
+        tops = sorted(b[1] for b in bands)
+        pitches = [tops[i + 1] - tops[i] for i in range(2)]
+        heights = [b[1] - b[0] for b in bands]
+        if (pitches[0] > 0
+                and max(pitches) - min(pitches) <= 0.28 * max(pitches)
+                and min(heights) >= 0.45 * max(heights)):
+            return 1000.0 + min(heights) / max(heights), True
+    return float(len(bands)), False
 
 
 def _hue_in(h, hl, hh):
