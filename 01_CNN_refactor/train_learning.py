@@ -41,6 +41,12 @@ CKPT = Path(__file__).parent / "cell_classifier_phone.pth"
 EPOCHS = 30
 LR = 1e-4
 BATCH = 32
+# Stop early when valid accuracy hasn't improved in this many consecutive
+# epochs.  Fine-tuning on a small confirmed corpus, the model plateaus after
+# ~15-20 epochs and longer runs risk overfitting; this makes epoch count
+# self-tuning instead of a hand-picked number.
+PATIENCE = 6
+VALID_EVERY = 1
 
 
 def backup_learning():
@@ -114,7 +120,23 @@ def main():
 
     opt = torch.optim.Adam(model.parameters(), lr=LR)
     sch = torch.optim.lr_scheduler.StepLR(opt, step_size=10, gamma=0.5)
-    for epoch in range(EPOCHS):
+
+    def valid_accuracy():
+        model.eval()
+        corr = tot = 0
+        with torch.no_grad():
+            for imgs, labs in vl:
+                pr = model(imgs.to(device)).argmax(1).cpu()
+                corr += (pr == labs).sum().item()
+                tot += labs.size(0)
+        model.train()
+        return corr / tot if tot else 0.0
+
+    best_acc = 0.0
+    best_state = None
+    best_epoch = 0
+    no_improve = 0
+    for epoch in range(1, EPOCHS + 1):
         model.train()
         tot = corr = 0
         for imgs, labs in tl:
@@ -127,7 +149,29 @@ def main():
                 corr += (model(imgs).argmax(1) == labs).sum().item()
             tot += labs.size(0)
         sch.step()
-        print(f"epoch {epoch + 1:2d} train acc={corr / tot:.4f}")
+        train_acc = corr / tot
+
+        if epoch % VALID_EVERY == 0 or epoch == EPOCHS:
+            va = valid_accuracy()
+            tag = ""
+            if va > best_acc:
+                best_acc = va
+                best_state = {k: v.clone() for k, v in model.state_dict().items()}
+                best_epoch = epoch
+                no_improve = 0
+                tag = "  <-- best"
+            else:
+                no_improve += 1
+            print(f"epoch {epoch:2d} train acc={train_acc:.4f} "
+                  f"valid acc={va:.4f}{tag}")
+            if no_improve >= PATIENCE:
+                print(f"no valid-acc improvement for {PATIENCE} epochs "
+                      f"(best {best_acc:.4f} @ epoch {best_epoch}); stopping early")
+                break
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+        print(f"restored best valid acc {best_acc:.4f} @ epoch {best_epoch}")
 
     model.eval()
     ys, pr = [], []

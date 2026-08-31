@@ -33,7 +33,12 @@ Run from `01_CNN_refactor/`:
    - SPLITS: sheets 1..24 → train, 25..30 → valid
    - Each sheet's cells are extracted via `sheet_to_cells_teal()` and cross-referenced against ground-truth `parse_truth()`; blank/no-truth cells are dropped.
 3. `merge_learning()` — copies every confirmed cell from `learning_cells/<number>/*.jpg` into `/tmp/phone_cells_v2/train/<number>/`. Filenames embed the scan id, so re-runs are idempotent.
-4. Fine-tunes `cell_classifier_phone.pth` for **30 epochs, lr 1e-4** (Adam, StepLR step=10 gamma=0.5, batch=32) on the merged set.
+4. Fine-tunes `cell_classifier_phone.pth` with **early stopping**: lr 1e-4
+   (Adam, StepLR step=10 gamma=0.5, batch=32), up to **30 epochs**, tracking the
+   best valid accuracy. Stops early when valid accuracy hasn't improved for
+   `PATIENCE` (6) consecutive epochs, then restores and saves the best-epoch
+   weights (so a long run never overfits — the epoch count is self-tuning; the
+   plateau is typically around epoch 15-20 for the current corpus size).
 5. Saves the new checkpoint as `cell_classifier_phone.pth`, old one → `.pth.bak`.
 
 Verification output is a `classification_report` on the valid split. Last retrain
