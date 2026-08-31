@@ -39,6 +39,7 @@ from typing import Optional
 
 import numpy as np
 from fastapi import APIRouter, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from bingo_card import BingoCard
@@ -141,6 +142,18 @@ def _cnn_model():
     return _CNN_MODEL
 
 
+@router.get("/scan-debug/{ts}.png")
+async def scan_debug_overlay(ts: int):
+    """Serve a scan's alignment overlay (the reader draws a green box per
+    detected cell on the normalized photo) so the client can verify the
+    cells line up with the physical sheet before saving.  Keyed by the
+    integer scan id — no path traversal possible."""
+    f = Path("/tmp/cnn_reader_debug") / f"overlay_{ts}.png"
+    if not f.is_file():
+        raise HTTPException(status_code=404, detail="no such scan overlay")
+    return FileResponse(f, media_type="image/png")
+
+
 @router.post("/scan-card")
 async def scan_card(file: UploadFile, corners: Optional[str] = Form(None)):
     if not file.content_type or not file.content_type.startswith("image/"):
@@ -160,7 +173,8 @@ async def scan_card(file: UploadFile, corners: Optional[str] = Form(None)):
             raise HTTPException(
                 status_code=422,
                 detail={"error": result["error"], "debug": result.get("debug", {})})
-        return {"cards": result["cards"], "scan_id": result.get("scan_id")}
+        return {"cards": result["cards"], "scan_id": result.get("scan_id"),
+            "debug": result.get("debug", {})}
 
     try:
         img = load_image(file_bytes)

@@ -336,6 +336,10 @@
   <div id="card">
     <div id="cardsContainer"></div>
     <div class="legend"><span class="swatch"></span> flagged — check this number</div>
+    <details id="alignCheck">
+      <summary>Verify alignment — green boxes are the detected cells</summary>
+      <img id="alignImg" alt="detected cell boxes over your photo">
+    </details>
     <button class="confirm" id="confirmBtn" disabled>Save card</button>
     <div class="saved-note" id="savedNote"></div>
   </div>
@@ -516,6 +520,9 @@
       }
       const data = await res.json();
       lastScanId = data.scan_id ?? null;
+      const alignImg = document.getElementById("alignImg");
+      if (lastScanId) alignImg.src = `${API_BASE}/scan-debug/${lastScanId}.png`;
+      alignImg.style.display = lastScanId ? "block" : "none";
       renderCards(data.cards);
       const anyNeedsReview = data.cards.some((c) => c.needs_review);
       const cardWord = data.cards.length === 1 ? "card" : `${data.cards.length} cards`;
@@ -677,6 +684,9 @@
 
   function resetForNextScan() {
     lastScanId = null;
+    const a = document.getElementById("alignImg");
+    a.style.display = "none";
+    a.src = "";
     cardEl.style.display = "none";
     fileInput.value = "";
     statusEl.textContent = `Saved. ${scannedThisSession.length} card(s) scanned this session.`;

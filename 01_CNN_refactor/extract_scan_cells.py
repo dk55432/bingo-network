@@ -51,7 +51,7 @@ def find_teal_bands(img):
     number rows below have low saturation, so a high per-row saturation
     fraction isolates the header bands. The band END is the card's row-1 top.
     """
-    return _mask_bands(_band_mask(img, hrange=(90, 125), s_min=60))
+    return _mask_bands(_band_mask(img, hrange=(90, 125), s_min=60, v_min=100))
 
 
 def find_header_bands(img):
@@ -60,57 +60,62 @@ def find_header_bands(img):
     Bingo sheet sets come in different print colors (teal/blue sheets,
     orange sets, green, ...): each card has a saturated horizontal BINGO
     banner and the number rows below are low-saturation.  Pick the color
-    family producing the tallest/plenty-within-band rows (teal first so
-    existing blue-sheet behavior is unchanged) and return its bands.
+    family producing the most band-like rows (teal first so existing
+    blue-sheet behavior is unchanged) and return its bands.
     """
     spec = _header_hue_spec(img)
     if spec is None:
         return []
-    hl, hh, s_min = spec
-    return _mask_bands(_band_mask(img, hrange=(hl, hh), s_min=s_min))
+    hl, hh, s_min, v_min, rowfrac = spec
+    return _mask_bands(_band_mask(img, hrange=(hl, hh), s_min=s_min,
+                                  v_min=v_min), rowfrac)
 
 
-# Candidate header print colors, teal first (original blue sheets).
+# Candidate header print colors, teal first (original blue sheets).  Each
+# entry is (hue range, s_min, v_min, row_fraction).  Teal keeps the
+# strict original thresholds so blue-sheet detection is byte-for-byte
+# unchanged; the other families relax them because e.g. green header ink
+# prints dimmer/less saturated than teal.
 _BAND_FAMILIES = [
-    ((90, 125), 60),   # teal (original blue sheets)
-    ((125, 160), 60),  # mid blues
-    ((5, 30), 80),     # orange sets
-    ((30, 90), 60),    # greens / yellows
-    ((160, 180), 80),  # reds / magenta
-    ((0, 5), 80),      # reds across the hue wrap
+    ((90, 125), 60, 100, 0.20),  # teal (original blue sheets)
+    ((125, 160), 60, 100, 0.20),  # mid blues
+    ((5, 30), 80, 100, 0.15),     # orange sets
+    ((30, 90), 45, 45, 0.18),     # green sets (dimmer ink)
+    ((160, 180), 60, 80, 0.15),   # reds / magenta
+    ((0, 5), 60, 80, 0.15),       # reds across the hue wrap
 ]
 
 
 def _header_hue_spec(img):
-    """Return the (h_low, h_high, s_min) of the sheet's header color, or
-    None if no sheet-like colored bands exist.
+    """Return the (h_low, h_high, s_min, v_min, rowfrac) of the sheet's
+    header color, or None if no sheet-like colored bands exist.
 
     Teal is the default and always wins when it yields any bands — the
     original blue sheets must remain byte-for-byte identical.  Only when
-    teal finds nothing do we consider other print colors (orange sets,
-    etc.), picked by which family produces the most band-like rows; if no
-    family matches, fall back to the image's own dominant saturated hue so
-    unseen print colors still work."""
+    teal finds nothing do we consider other print colors (orange/green
+    sets, etc.), picked by which family produces the most band-like rows;
+    if no family matches, fall back to the image's own dominant saturated
+    hue so unseen print colors still work."""
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     h = hsv[:, :, 0].astype(int)
     s = hsv[:, :, 1].astype(int)
     v = hsv[:, :, 2].astype(int)
     teal_mask = _hue_in(h, 90, 125) & (s > 60) & (v > 100)
     if _band_score(_mask_bands(teal_mask)) > 0:
-        return (90, 125, 60)
+        return (90, 125, 60, 100, 0.20)
     best, best_score = None, -1
-    for hrange, s_min in _BAND_FAMILIES[1:]:
-        mask = _hue_in(h, *hrange) & (s > s_min) & (v > 100)
-        score = _band_score(_mask_bands(mask))
+    for (hl, hh), s_min, v_min, rowfrac in _BAND_FAMILIES[1:]:
+        mask = _hue_in(h, hl, hh) & (s > s_min) & (v > v_min)
+        score = _band_score(_mask_bands(mask, rowfrac))
         if score > best_score:
-            best_score, best = score, (hrange[0], hrange[1], s_min)
+            best_score, best = score, (hl, hh, s_min, v_min, rowfrac)
     if best is not None and best_score > 0:
         return best
-    sat = (s > 60) & (v > 100)
+    sat = (s > 45) & (v > 45)
     if sat.sum() < 0.01 * img.shape[0] * img.shape[1]:
         return None
     dom = int(np.bincount(h[sat].ravel()).argmax())
-    return ((dom - 20) % 180, (dom + 20) % 180, 60)
+    return ((dom - 20) % 180, (dom + 20) % 180, 45, 45, 0.12)
 
 
 def _hue_in(h, hl, hh):
@@ -119,19 +124,19 @@ def _hue_in(h, hl, hh):
     return (h >= hl) | (h <= hh)
 
 
-def _band_mask(img, hrange, s_min):
+def _band_mask(img, hrange, s_min, v_min):
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     h = hsv[:, :, 0].astype(int)
     s = hsv[:, :, 1].astype(int)
     v = hsv[:, :, 2].astype(int)
-    return _hue_in(h, *hrange) & (s > s_min) & (v > 100)
+    return _hue_in(h, *hrange) & (s > s_min) & (v > v_min)
 
 
-def _mask_bands(mask):
-    """Rows where the band covers >20% of the width, grouped into
+def _mask_bands(mask, rowfrac=0.20):
+    """Rows where the band covers >rowfrac of the width, grouped into
     contiguous runs at least 15 rows tall, as (start, end) y ranges."""
     rowcnt = mask.mean(axis=1)
-    rows = [y for y in range(len(rowcnt)) if rowcnt[y] > 0.20]
+    rows = [y for y in range(len(rowcnt)) if rowcnt[y] > rowfrac]
     runs = []
     for y in rows:
         if runs and y - runs[-1][-1] <= 1:

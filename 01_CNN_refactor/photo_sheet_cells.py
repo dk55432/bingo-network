@@ -79,14 +79,14 @@ def teal_card_bboxes(img):
     spec = _header_hue_spec(img)
     if spec is None:
         return []
-    hl, hh, s_min = spec
+    hl, hh, s_min, v_min, rowfrac = spec
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     h = hsv[:, :, 0].astype(int)
     s = hsv[:, :, 1].astype(int)
     v = hsv[:, :, 2].astype(int)
-    teal = _hue_in(h, hl, hh) & (s > s_min) & (v > 100)
+    teal = _hue_in(h, hl, hh) & (s > s_min) & (v > v_min)
     rowcnt = teal.mean(axis=1)
-    rows = [y for y in range(len(rowcnt)) if rowcnt[y] > 0.20]
+    rows = [y for y in range(len(rowcnt)) if rowcnt[y] > rowfrac]
     runs = []
     for y in rows:
         if runs and y - runs[-1][-1] <= 1:
