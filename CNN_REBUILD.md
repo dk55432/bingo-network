@@ -1,0 +1,115 @@
+# CNN Phone-Card Reader — Capture Doc
+
+This file is the durable record for a fresh agent (or a fresh session) to get up
+to speed on the machine-learning card-reading pipeline in `01_CNN_refactor/`
+without the original author's memory. Read this first; the rest of the repo
+(code + this file) is the source of truth.
+
+Last updated: 2026-08-31.
+
+## What the pipeline does
+
+`bingo_scan.py` exposes the scan API. With `READER=cnn`, a photo of a full bingo
+sheet (typically 3 cards stacked vertically) is normalized, card header bands
+are auto-detected, each card is divided into a 5x5 grid of cells, and each cell
+is classified by a small CNN to a bingo number (1..75). Results are shown for
+human review, and confirmed cells are saved to a `learning_cells/` corpus for
+periodic retraining.
+
+## The retrain loop (how to retrain)
+
+Run from `01_CNN_refactor/`:
+
+```bash
+/Users/davidkohn/Downloads/bingo-network/.venv/bin/python train_learning.py
+```
+
+`train_learning.py` does, in order:
+
+1. `backup_learning()` — tars `learning_cells/` into `learning_backups/learning_<ts>.tar.gz` (keeps last 20). This is the confirmed-cell corpus snapshot.
+2. `build()` (from `train_phone_cells.py`) — rebuilds the base whole-cell dataset into `/tmp/phone_cells_v2` from the phone photos:
+   - Batch A: `phone_sheets/` (sheets 1..30)
+   - Batch B: `phone_sheets3/` **minus sheet 1** (bad frame)
+   - SPLITS: sheets 1..24 → train, 25..30 → valid
+   - Each sheet's cells are extracted via `sheet_to_cells_teal()` and cross-referenced against ground-truth `parse_truth()`; blank/no-truth cells are dropped.
+3. `merge_learning()` — copies every confirmed cell from `learning_cells/<number>/*.jpg` into `/tmp/phone_cells_v2/train/<number>/`. Filenames embed the scan id, so re-runs are idempotent.
+4. Fine-tunes `cell_classifier_phone.pth` for **30 epochs, lr 1e-4** (Adam, StepLR step=10 gamma=0.5, batch=32) on the merged set.
+5. Saves the new checkpoint as `cell_classifier_phone.pth`, old one → `.pth.bak`.
+
+Verification output is a `classification_report` on the valid split. Last retrain
+was 917 → 2175 confirmed cells.
+
+## How confirmed cells are produced (the learning loop)
+
+1. `POST /scan-card` (CNN path) writes each cell crop to `/tmp/phone_learning_pending/<scan_id>/` and returns `scan_id` (and `debug.ts`).
+2. `templates/scan.html` stores `lastScanId`.
+3. When the user confirms, `POST /cards {game_id, player_id, grids, scan_id}` → `_save_learning_cells` pairs grid i (card id = i+1) with the pending crops, writing `learning_cells/<number>/<scan_id>_c<cid>_r<r>c<c>.jpg`. Best-effort — failures are non-fatal.
+
+## Gray / washed-out sheets — the 3-tap assist
+
+Some photos (pale gray sheets photographed small/under-lit) have no detectable
+header color and auto-scan fails. Rather than read the desk as cards, the reader
+raises an actionable error and the UI offers **manual assisted scan**:
+
+- `POST /scan-assist` re-processes the original photo with the user's taps.
+- The user taps (or drags) the **top edge of each of the 3 gray bars** in `scan.html`. Taps are % coords, converted via `assistImg.naturalHeight`.
+- `POST /scan-assist` takes `band_tops` (pixel rows, 3 taps) → `cells_from_forced()` pins the card geometry. **Requires exactly 3 readable cards** (1 or 2 → HTTP 422 "assisted scan couldn't verify all 3 cards").
+
+So a gray sheet is always scanned via the assist path; the auto path only flags it
+(`debug.partial_sheet` when <3 cards detected) and steers the user there.
+
+## Grid alignment (critical detail)
+
+Cell row boundaries are found by "snapping" equal division toward printed grid
+lines. This was a real bug: the original snap used a full-image-width mean
+(`(255 - gray).mean(axis=1)`), which **dilutes the thin dark grid lines into
+noise** (a 2px line at brightness ~30 averaged over ~950 columns of white cells).
+The result was uneven rows and a systematic "the number I want is one cell below
+where I'm looking" error.
+
+The fix (`photo_sheet_cells.py`): a per-card **brightness-dip** signal computed in
+a narrow vertical strip (12px wide, centered on the card). Grid lines are clearly
+visible in a narrow strip, and the dip score (how much darker a row is than its
+5-row neighbors) peaks sharply at each line. The snap now finds real grid lines.
+
+Geometery keys:
+- `_grid_dip(gray, x0, x1, top, bottom, strip_w=12)` — the dip signal.
+- `_snap(bounds, signal, lo, hi, radius=40)` — radius 40 (larger overshoots to adjacent card boundaries).
+
+## Model / decode mapping
+
+- `CellClassifier` (in `train_phone_cells.py`) is a small CNN; 76 output classes (index 0 unused).
+- `cnn_reader.` maps logits to numbers via `IDX_TO_NUM` (lexicographically sorted class order — index i = i-th smallest label).
+- `decode_card` does a per-column **linear_sum_assignment** between the 5 non-FREE cells and the 15 legal numbers (COLUMN_RANGES: col→(1-15),(16-30),(31-45),(46-60),(61-75)), maximizing total log-probability, no repeats.
+- FREE cell is (2,2) — exempt from decoding.
+- `needs_review` is set when mean conf < 0.25 or min conf < 0.08. The review gate is the correctness backstop (model has inherent ~0.66 valid acc, hypersensitive to ±5px crop shifts).
+
+## Files that matter
+
+- `cnn_reader.py` — `read_sheet_bytes`, `_read_sheet`, `cells_from`, `cells_from_forced`, `cell_logits`, `decode_card`, `_persist_pending_cells`.
+- `photo_sheet_cells.py` — `teal_card_bboxes`, `_grid_dip`, `_snap`, `_card_y_extent`, `_frame_bright_extent`, `sheet_to_cells_teal`, `sheet_to_cells_forced`, `forced_card_bboxes`.
+- `extract_scan_cells.py` — `_BAND_FAMILIES`, `_header_hue_spec`, `_sheet_structure`, `sheet_to_cells`.
+- `train_learning.py`, `train_phone_cells.py`.
+- `bingo_scan.py` — `POST /scan-card`, `POST /scan-assist`, `GET /scan-debug/{ts}.png`, `GET /scan-debug-in/{ts}.png`, `POST /cards` (confirm), `_save_learning_cells`.
+- `templates/scan.html` — assist panel, `handleScanSuccess`, `partial_sheet` steering.
+
+## Debug dumps (regression set)
+
+`_read_sheet` dumps the normalized input + a green-cell-box overlay to
+`/tmp/cnn_reader_debug/in_<ts>.png` / `overlay_<ts>.png`. To test a reader change,
+re-run `cnn_reader._read_sheet()` over the dump set and verify card counts don't
+regress (24 dumps: gray working / gray fail / gray uneven / 1-card / 2-card; pink;
+orange; green). `GET /scan-debug-in/{ts}.png` serves the tap image for the assist.
+
+## Holdover / known limitations
+
+- Sheet-bottom clamp on bright tables (making the last card's region never extend off the sheet) is unsolved — ink-fraction alone doesn't stop at the sheet edge.
+- First/last row of each card are structurally smaller/larger (band detection doesn't perfectly align with the grid); the 3 middle rows are now well-aligned.
+- CPU-only training is slow; a dedicated machine (e.g. Raspberry Pi) is the intended host.
+
+## Migration checklist (if moving hosts)
+
+In git (portable via `git clone`/`git fetch`): all code + `cell_classifier_phone.pth`.
+**NOT in git (gitignored) — must copy manually to retrain on the new host:**
+`phone_sheets/`, `phone_sheets3/`, `learning_cells/` from this Mac. `learning_backups/`
+have the corpus tarballs too. For running inference only, the committed `.pth` is enough.

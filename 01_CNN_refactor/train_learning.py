@@ -84,6 +84,10 @@ def merge_learning():
 
 
 def main():
+    # Line-buffer stdout so that when piped (e.g. nohup ... &> log), each
+    # epoch's progress line is flushed immediately instead of at process
+    # exit.  This makes long CPU retrains observable/monitorable.
+    sys.stdout.reconfigure(line_buffering=True)
     torch.manual_seed(0)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if not CKPT.exists():
