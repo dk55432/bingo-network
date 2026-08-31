@@ -286,6 +286,9 @@
     cursor: grab;
   }
 
+  .assist-line { stroke: var(--stamp-red); stroke-width: 1.0; }
+  .assist-dot { fill: var(--stamp-red); stroke: #fff; stroke-width: 0.8; cursor: grab; }
+
   .corner-hint {
     font-size: 13px;
     color: var(--muted);
@@ -333,12 +336,23 @@
     <button class="scan-another" id="retakeBtn">Choose a different photo</button>
   </div>
 
+  <div id="assistPanel" style="display:none;">
+    <div class="corner-picker-wrap" id="assistWrap">
+      <img id="assistImg" alt="Assisted scan photo">
+      <svg id="assistSvg" viewBox="0 0 100 100" preserveAspectRatio="none"></svg>
+    </div>
+    <p class="corner-hint" id="assistHint">Tap the top of each of the 3 gray bars — each bar sits above its card's grid. Tap: 1, 2, 3.</p>
+    <button class="confirm" id="assistScanBtn" disabled>Scan with taps (0/3)</button>
+    <button class="scan-another" id="assistCancelBtn">Cancel assisted scan</button>
+  </div>
+
   <div id="card">
     <div id="cardsContainer"></div>
     <div class="legend"><span class="swatch"></span> flagged — check this number</div>
     <details id="alignCheck">
       <summary>Verify alignment — green boxes are the detected cells</summary>
       <img id="alignImg" alt="detected cell boxes over your photo">
+      <button class="scan-another" id="assistBtn" style="display:none;">Misaligned or wrong cards? Tap the 3 card tops instead</button>
     </details>
     <button class="confirm" id="confirmBtn" disabled>Save card</button>
     <div class="saved-note" id="savedNote"></div>
@@ -370,6 +384,7 @@
   const cardsContainer = document.getElementById("cardsContainer");
   const confirmBtn = document.getElementById("confirmBtn");
   let lastScanId = null;
+  let scanError = null;
   const savedNote = document.getElementById("savedNote");
   const sessionListEl = document.getElementById("sessionList");
   const sessionCardsEl = document.getElementById("sessionCards");
@@ -387,7 +402,17 @@
   const manualEntryBtn = document.getElementById("manualEntryBtn");
   const manualEntryStatus = document.getElementById("manualEntryStatus");
 
+  const assistPanel = document.getElementById("assistPanel");
+  const assistWrap = document.getElementById("assistWrap");
+  const assistImg = document.getElementById("assistImg");
+  const assistSvg = document.getElementById("assistSvg");
+  const assistHint = document.getElementById("assistHint");
+  const assistScanBtn = document.getElementById("assistScanBtn");
+  const assistCancelBtn = document.getElementById("assistCancelBtn");
+  const assistBtn = document.getElementById("assistBtn");
+
   const scannedThisSession = [];
+  let assistTaps = [];
 
   // Corner picker state — positions stored as percentages (0-100) of the
   // displayed image box, which is what the SVG's viewBox is in too. That
@@ -488,9 +513,11 @@
 
   retakeBtn.addEventListener("click", () => {
     cornerPicker.style.display = "none";
+    assistPanel.style.display = "none";
     uploadBox.style.display = "block";
     fileInput.value = "";
     selectedFile = null;
+    scanError = null;
   });
 
   confirmCornersBtn.addEventListener("click", async () => {
@@ -516,25 +543,166 @@
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         if (err.detail?.debug) console.warn("scan debug:", err.detail.debug);
+        scanError = err.detail || null;
         throw new Error(err.detail?.error || err.detail || "Scan failed");
       }
-      const data = await res.json();
-      lastScanId = data.scan_id ?? null;
-      const alignImg = document.getElementById("alignImg");
-      if (lastScanId) alignImg.src = `${API_BASE}/scan-debug/${lastScanId}.png`;
-      alignImg.style.display = lastScanId ? "block" : "none";
-      renderCards(data.cards);
-      const anyNeedsReview = data.cards.some((c) => c.needs_review);
-      const cardWord = data.cards.length === 1 ? "card" : `${data.cards.length} cards`;
+      handleScanSuccess(await res.json());
+    } catch (e) {
+      const dbg = scanError?.debug;
+      if (dbg?.ts) {
+        statusEl.textContent = `Error: ${e.message} — tap the 3 card tops to scan it manually:`;
+        openAssist(dbg.ts);
+      } else {
+        statusEl.textContent = `Error: ${e.message}`;
+        uploadBox.style.display = "block";
+      }
+    }
+  });
+
+  function handleScanSuccess(data) {
+    lastScanId = data.scan_id ?? null;
+    const alignImg = document.getElementById("alignImg");
+    if (lastScanId) alignImg.src = `${API_BASE}/scan-debug/${lastScanId}.png`;
+    alignImg.style.display = lastScanId ? "block" : "none";
+    assistBtn.style.display = lastScanId ? "inline-block" : "none";
+    assistPanel.style.display = "none";
+    uploadBox.style.display = "none";
+    renderCards(data.cards);
+    const anyNeedsReview = data.cards.some((c) => c.needs_review);
+    const cardWord = data.cards.length === 1 ? "card" : `${data.cards.length} cards`;
+    const partial = !!data.debug?.partial_sheet;
+    if (partial) {
+      assistBtn.textContent = "This may be a 3-card sheet in low light — tap the 3 card tops to get all 3 →";
+      statusEl.textContent = `Found only ${cardWord}. As in low light the headers can wash out, ` +
+        `this may be a 3-card sheet read as one. Review below, or tap the 3 card tops to scan all 3.`;
+    } else {
+      assistBtn.textContent = "Misaligned or wrong cards? Tap the 3 card tops instead";
       statusEl.textContent = anyNeedsReview
         ? `Found ${cardWord} — some numbers need a check, flagged in red below.`
         : `Found ${cardWord} — review, then save.`;
-      cardEl.style.display = "block";
-      confirmBtn.textContent = data.cards.length === 1 ? "Save card" : `Save ${data.cards.length} cards`;
-      confirmBtn.disabled = false;
+    }
+    cardEl.style.display = "block";
+    confirmBtn.textContent = data.cards.length === 1 ? "Save card" : `Save ${data.cards.length} cards`;
+    confirmBtn.disabled = false;
+  }
+
+  function openAssist(ts) {
+    assistTaps = [];
+    assistImg.src = `${API_BASE}/scan-debug-in/${ts}.png`;
+    assistHint.textContent = "Tap the top of each of the 3 gray bars, then drag to fine-tune. Tap: 1, 2, 3.";
+    assistPanel.style.display = "block";
+    renderAssistOverlay();
+  }
+
+  const SVGNS = "http://www.w3.org/2000/svg";
+  let assistLineEls = [];
+  let assistDotEls = [];
+  let dragMarker = -1;
+
+  function renderAssistOverlay() {
+    assistSvg.innerHTML = "";
+    assistLineEls = [];
+    assistDotEls = [];
+    assistTaps.forEach((y, i) => {
+      const line = document.createElementNS(SVGNS, "line");
+      line.setAttribute("class", "assist-line");
+      line.setAttribute("x1", "0");
+      line.setAttribute("x2", "100");
+      const dot = document.createElementNS(SVGNS, "circle");
+      dot.setAttribute("class", "assist-dot");
+      dot.setAttribute("cx", "3");
+      dot.setAttribute("r", "2.6");
+      assistSvg.appendChild(line);
+      assistSvg.appendChild(dot);
+      assistLineEls.push(line);
+      assistDotEls.push(dot);
+    });
+    updateAssistOverlay();
+    assistScanBtn.disabled = assistTaps.length !== 3;
+    assistScanBtn.textContent = assistTaps.length === 3
+      ? "Scan with taps" : `Scan with taps (${assistTaps.length}/3)`;
+  }
+
+  function updateAssistOverlay() {
+    assistTaps.forEach((y, i) => {
+      if (i < assistLineEls.length) {
+        assistLineEls[i].setAttribute("y1", y);
+        assistLineEls[i].setAttribute("y2", y);
+        assistDotEls[i].setAttribute("cy", y);
+      }
+    });
+  }
+
+  function assistYFromEvent(e) {
+    const rect = assistWrap.getBoundingClientRect();
+    if (!rect.height) return null;
+    const y = ((e.clientY - rect.top) / rect.height) * 100;
+    return Math.max(0, Math.min(100, y));
+  }
+
+  assistSvg.addEventListener("pointerdown", (e) => {
+    const y = assistYFromEvent(e);
+    if (y === null) return;
+    e.preventDefault();
+    assistSvg.setPointerCapture(e.pointerId);
+    dragMarker = assistTaps.findIndex((t) => Math.abs(t - y) < 4);
+    if (dragMarker === -1) {
+      if (assistTaps.length >= 3) assistTaps.pop();
+      const ny = Number(y.toFixed(2));
+      assistTaps.push(ny);
+      assistTaps.sort((a, b) => a - b);
+      renderAssistOverlay();
+      dragMarker = assistTaps.indexOf(ny);
+    }
+  });
+
+  assistSvg.addEventListener("pointermove", (e) => {
+    if (dragMarker < 0) return;
+    const y = assistYFromEvent(e);
+    if (y === null) return;
+    assistTaps[dragMarker] = Number(y.toFixed(2));
+    updateAssistOverlay();
+  });
+
+  ["pointerup", "pointercancel"].forEach((evt) => {
+    assistSvg.addEventListener(evt, () => {
+      dragMarker = -1;
+      assistTaps.sort((a, b) => a - b);
+      renderAssistOverlay();
+    });
+  });
+
+  assistCancelBtn.addEventListener("click", () => {
+    assistPanel.style.display = "none";
+  });
+
+  assistBtn.addEventListener("click", () => {
+    if (lastScanId) openAssist(lastScanId);
+  });
+
+  assistScanBtn.addEventListener("click", async () => {
+    if (!selectedFile || assistTaps.length !== 3) return;
+    if (!assistImg.naturalHeight) {
+      statusEl.textContent = "Photo still loading — try again in a moment.";
+      return;
+    }
+    const pixels = assistTaps.map((p) => Math.round((p / 100) * assistImg.naturalHeight));
+    assistScanBtn.disabled = true;
+    const fd = new FormData();
+    fd.append("file", selectedFile);
+    fd.append("band_tops", JSON.stringify(pixels));
+    statusEl.textContent = "Scanning with taps…";
+    try {
+      const res = await fetch(`${API_BASE}/scan-assist`, { method: "POST", body: fd });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        scanError = err.detail || null;
+        throw new Error(err.detail?.error || err.detail || "Assisted scan failed");
+      }
+      handleScanSuccess(await res.json());
     } catch (e) {
-      statusEl.textContent = `Error: ${e.message}`;
-      uploadBox.style.display = "block";
+      statusEl.textContent = `Assisted scan error: ${e.message}`;
+      assistScanBtn.disabled = false;
     }
   });
 
@@ -684,9 +852,12 @@
 
   function resetForNextScan() {
     lastScanId = null;
+    scanError = null;
     const a = document.getElementById("alignImg");
     a.style.display = "none";
     a.src = "";
+    assistPanel.style.display = "none";
+    assistBtn.style.display = "none";
     cardEl.style.display = "none";
     fileInput.value = "";
     statusEl.textContent = `Saved. ${scannedThisSession.length} card(s) scanned this session.`;

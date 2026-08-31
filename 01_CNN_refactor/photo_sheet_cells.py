@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from pipeline import _cell_boundaries, find_grid_line_positions  # noqa: E402
 from extract_scan_cells import (  # noqa: E402
     INSET,
+    _BAND_FAMILIES,
     _header_hue_spec,
     _hue_in,
 )
@@ -107,7 +108,20 @@ def teal_card_bboxes(img):
         if cols.size == 0:
             continue
         boxes.append((int(cols[0]), y0, int(cols[-1]), y1))
-    return sorted(boxes, key=lambda b: b[1])
+    boxes = sorted(boxes, key=lambda b: b[1])
+    family_specs = {(hl, hh, s_min, v_min, rowfrac)
+                    for (hl, hh), s_min, v_min, rowfrac in _BAND_FAMILIES}
+    if spec not in family_specs:
+        # Last-resort (adaptive dominant-hue) masks cover the whole frame on
+        # washed photos, so the boxes poke off the sheet onto the table.
+        # Clamp them to the paper's bright column extent; real family masks
+        # are the printed color itself and stay untouched.
+        ext = _frame_bright_extent(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
+        if ext is not None:
+            x_left, x_right = ext
+            boxes = [(max(x0, x_left), y0, min(x1, x_right), y1)
+                     for x0, y0, x1, y1 in boxes]
+    return boxes
 
 
 def _snap(bounds, dark, lo, hi, radius):
@@ -138,13 +152,13 @@ def _card_y_extent(gray, top, hint_bottom):
     return min(hint_bottom, top + int(below[-1]) + 2)
 
 
-def sheet_to_cells_teal(img, verbose=False, return_geometry=False):
-    """Card geometry derived from teal header bboxes (card top, fallback
-    estimate) plus bright-paper extent per card for the column bounds.
-    Equal-division rows/cols are snapped toward the darkest nearby line
-    (the printed grid rules) in the grayscale. No thin-line detection
-    needed beyond that local snap."""
-    boxes = teal_card_bboxes(img)
+def _sheet_to_cells_with_boxes(
+        img, boxes, verbose=False, return_geometry=False):
+    """Shared per-card cell extraction for a list of (x0, y0, x1, y1) band
+    boxes (card top, fallback estimate) plus bright-paper extent per card
+    for the column bounds.  Equal-division rows/cols are snapped toward
+    the darkest nearby line (the printed grid rules) in the grayscale. No
+    thin-line detection needed beyond that local snap."""
     if not boxes:
         return []
     H, W = img.shape[:2]
@@ -176,6 +190,67 @@ def sheet_to_cells_teal(img, verbose=False, return_geometry=False):
                 else:
                     cells_out.append((i + 1, r, c, cell))
     return cells_out
+
+
+def sheet_to_cells_teal(img, verbose=False, return_geometry=False):
+    """Card geometry derived from teal header bboxes (auto-detected sheet
+    print color, see teal_card_bboxes).  See _sheet_to_cells_with_boxes."""
+    return _sheet_to_cells_with_boxes(
+        img, teal_card_bboxes(img), verbose, return_geometry)
+
+
+def _frame_bright_extent(gray):
+    """Sheet's bright-paper column extent over the whole frame, used to
+    seed the column bounds when no header color is detectable."""
+    colmean = gray.mean(axis=0).astype(np.uint8)
+    thr, _ = cv2.threshold(colmean, 0, 255,
+                           cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    bright = colmean > max(40, int(thr) * 0.90)
+    xs = np.where(bright)[0]
+    if xs.size == 0:
+        return None
+    return int(xs[0]), int(xs[-1])
+
+
+def forced_card_bboxes(img, band_tops):
+    """Build 3 card-band boxes from user-tapped rows (each tap = the TOP
+    edge of a card's gray header bar, in the normalized image's pixel
+    space).  The card body top is band_top + band height, where band
+    height is a fixed fraction of the card pitch (the printed header bars
+    are a consistent ~0.13 of card pitch across sheet colors); the column
+    extent comes from the card's bright-paper body (see _card_x_extent),
+    independent of the washed-out header color."""
+    H, W = img.shape[:2]
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    tops = sorted(int(round(min(H - 2, max(2, float(t)))))
+                  for t in band_tops)
+    if len(tops) < 3:
+        return []
+    ext = _frame_bright_extent(gray)
+    cx = (ext[0] + ext[1]) / 2 if ext else W / 2
+    boxes = []
+    for i, t in enumerate(tops):
+        pitch = (tops[1] - tops[0]) if i == 0 else (tops[i] - tops[i - 1])
+        if i + 1 < len(tops):
+            next_t = tops[i + 1]
+        else:
+            next_t = min(H, t + int(round(1.25 * max(120, pitch))))
+        h = int(max(30, min(90, round(0.13 * pitch))))
+        y1 = min(H - 2, t + h)
+        xL, xR = _card_x_extent(gray, y1 + 2, next_t, cx)
+        if xL < 0:
+            xL, xR = ext if ext else (0, W - 1)
+        boxes.append((int(xL), t, int(xR), int(y1)))
+    return boxes
+
+
+def sheet_to_cells_forced(img, band_tops, verbose=False,
+                          return_geometry=False):
+    """Card geometry pinned to user-tapped band tops — the assisted-scan
+    path for washed-out photos (e.g. gray sheets) where no header color
+    gate can find the card bands on its own."""
+    return _sheet_to_cells_with_boxes(
+        img, forced_card_bboxes(img, band_tops), verbose, return_geometry)
 
 
 def _card_x_extent(gray, y0, y1, cx):

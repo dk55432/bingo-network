@@ -154,6 +154,16 @@ async def scan_debug_overlay(ts: int):
     return FileResponse(f, media_type="image/png")
 
 
+@router.get("/scan-debug-in/{ts}.png")
+async def scan_debug_in(ts: int):
+    """Serve a scan's raw normalized input photo (no overlay) — used as the
+    tap-target image for the assisted scan."""
+    f = Path("/tmp/cnn_reader_debug") / f"in_{ts}.png"
+    if not f.is_file():
+        raise HTTPException(status_code=404, detail="no such scan photo")
+    return FileResponse(f, media_type="image/png")
+
+
 @router.post("/scan-card")
 async def scan_card(file: UploadFile, corners: Optional[str] = Form(None)):
     if not file.content_type or not file.content_type.startswith("image/"):
@@ -209,6 +219,49 @@ async def scan_card(file: UploadFile, corners: Optional[str] = Form(None)):
     cards = [_ocr_one_card(segment_grid(card_img)) for card_img in card_images]
 
     return {"cards": cards}
+
+
+@router.post("/scan-assist")
+async def scan_assist(file: UploadFile, band_tops: str = Form(...)):
+    """Assisted scan for washed-out sheets (e.g. gray cards) when the auto
+    header-color detection can't find the card bands: the client taps the
+    TOP of each of the 3 gray header bars on the normalized photo
+    (/scan-debug-in/{scan_id}.png) and sends those pixel rows here.  The
+    card grid is then pinned to those taps before running the same
+    whole-cell CNN decode."""
+    if os.environ.get("READER", "tesseract") != "cnn":
+        raise HTTPException(status_code=400,
+                            detail="Assisted scan needs READER=cnn")
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400,
+                            detail="Uploaded file must be an image")
+    try:
+        tops = json.loads(band_tops)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400,
+                            detail="band_tops must be a JSON array of 3 rows")
+    if not (isinstance(tops, list) and len(tops) == 3
+            and all(isinstance(v, (int, float)) and 0 <= v <= 65535
+                    for v in tops)):
+        raise HTTPException(
+            status_code=400,
+            detail="band_tops must be exactly 3 pixel rows [y1, y2, y3]")
+
+    file_bytes = await file.read()
+    try:
+        # Re-normalize the ORIGINAL photo (deterministic) so tap coordinates
+        # from the /scan-debug-in dump match the image actually processed.
+        result = _cnn_module().read_sheet_bytes(
+            _cnn_model(), file_bytes, forced_bands=[float(t) for t in tops])
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if result.get("error"):
+        raise HTTPException(
+            status_code=422,
+            detail={"error": result["error"],
+                    "debug": result.get("debug", {})})
+    return {"cards": result["cards"], "scan_id": result.get("scan_id"),
+        "debug": result.get("debug", {})}
 
 
 @router.get("/games/{game_id}/players/{player_id}")

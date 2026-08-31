@@ -203,6 +203,19 @@ def cells_from(sheet_bgr):
     return by, boxes
 
 
+def cells_from_forced(sheet_bgr, band_tops):
+    """Same as cells_from but pins the card layout to user-tapped band tops
+    (assisted scan for washed-out sheets)."""
+    items = photo_sheet_cells.sheet_to_cells_forced(
+        sheet_bgr, band_tops, return_geometry=True)
+    by = {}
+    boxes = {}
+    for cid, r, c, cell, box in items:
+        by.setdefault(cid, {})[(r, c)] = cell
+        boxes.setdefault(cid, {})[(r, c)] = box
+    return by, boxes
+
+
 def cell_logits(model, cell_bgr):
     """(75,) float32 logits for one BGR cell."""
     gray = cv2.cvtColor(cell_bgr, cv2.COLOR_BGR2GRAY)
@@ -281,9 +294,10 @@ def card_result(numbers, confs):
     return {"grid": grid, "needs_review": needs_review}
 
 
-def read_sheet_bytes(model, data):
-    """Read a full photo (raw bytes) -> server-shaped /scan-card payload."""
-    return _read_sheet(model, _normalize(load_photo_bytes(data)))
+def read_sheet_bytes(model, data, forced_bands=None):
+    """Read a full photo (raw bytes) -> server-shaped /scan-card payload.
+    forced_bands: 3 y-rows (user taps) pinning each card's header band."""
+    return _read_sheet(model, _normalize(load_photo_bytes(data)), forced_bands)
 
 
 def read_sheet_path(model, path):
@@ -326,15 +340,22 @@ def _structure_ok(bboxes):
     return True, ""
 
 
-def _read_sheet(model, sheet_bgr):
+def _read_sheet(model, sheet_bgr, forced_bands=None):
     """sheet_bgr (normalized full-sheet BGR) -> /scan-card payload.
+
+    forced_bands: when the auto header-color detection fails (washed-out
+    gray sheets), the caller supplies 3 tapped rows — one per card's band
+    top — and the card geometry is pinned to those instead.
 
     Always dumps the normalized input + a cell-box overlay to
     /tmp/cnn_reader_debug (with per-card ink/confidence stats) so any
     misread can be diagnosed after the fact.
     """
     sheet_bgr, warped = _warp_sheet(sheet_bgr)
-    by_card, bboxes = cells_from(sheet_bgr)
+    if forced_bands:
+        by_card, bboxes = cells_from_forced(sheet_bgr, forced_bands)
+    else:
+        by_card, bboxes = cells_from(sheet_bgr)
     ts = int(time.time())
     dbg = Path("/tmp/cnn_reader_debug")
     dbg.mkdir(parents=True, exist_ok=True)
@@ -347,10 +368,14 @@ def _read_sheet(model, sheet_bgr):
     cv2.imwrite(str(dbg / f"overlay_{ts}.png"), overlay)
     ok, msg = _structure_ok(bboxes)
     if not ok:
+        if forced_bands:
+            msg = ("assisted scan couldn't verify a valid 3-card layout - "
+                   "tap the top edge of each gray bar more precisely")
         hue = _teal_hue_stats(sheet_bgr)
         return {"cards": [], "error": msg, "debug": {
             "dump_in": str(dbg / f"in_{ts}.png"),
             "dump_overlay": str(dbg / f"overlay_{ts}.png"),
+            "ts": str(ts),
             "bands": sorted({v[1] for cell_boxes in bboxes.values()
                              for v in cell_boxes.values()}) if bboxes else [],
             "hue_med": round(float(hue[0])),
@@ -358,16 +383,32 @@ def _read_sheet(model, sheet_bgr):
             "sat_med": round(float(hue[2])),
             "val_med": round(float(hue[3]))}}
     if not by_card:
+        if forced_bands:
+            msg = ("assisted scan found no cells at the tapped rows - tap "
+                   "the top edge of each gray bar directly")
+        else:
+            msg = ("no header bands detected - reframe so the sheet fills "
+                   "the frame (all 3 cards, flat and top-lit) and try again")
         hue = _teal_hue_stats(sheet_bgr)
-        return {"cards": [], "error": ("no header bands detected - reframe "
-                "so the sheet fills the frame (all 3 cards, flat and "
-                "top-lit) and try again"), "debug": {
+        return {"cards": [], "error": msg, "debug": {
             "dump_in": str(dbg / f"in_{ts}.png"),
             "dump_overlay": str(dbg / f"overlay_{ts}.png"),
+            "ts": str(ts),
             "hue_med": round(float(hue[0])),
             "hue_pct20_80": [round(float(x), 1) for x in hue[1]],
             "sat_med": round(float(hue[2])),
             "val_med": round(float(hue[3]))}}
+    if forced_bands and len(by_card) != 3:
+        # Assisted scans are pinned to 3 user taps — silently emitting 2
+        # cards means a tap landed on the wrong bar, so error for a re-tap.
+        return {"cards": [], "error": ("assisted scan couldn't verify all "
+                "3 cards - tap the top edge of each gray bar precisely and "
+                "try again"), "debug": {
+            "dump_in": str(dbg / f"in_{ts}.png"),
+            "dump_overlay": str(dbg / f"overlay_{ts}.png"),
+            "ts": str(ts),
+            "bands": sorted({v[1] for cell_boxes in bboxes.values()
+                             for v in cell_boxes.values()}) if bboxes else []}}
 
     cards = []
     for cid in sorted(by_card):
@@ -390,6 +431,8 @@ def _read_sheet(model, sheet_bgr):
     return {"cards": cards, "scan_id": str(ts), "debug": {
         "dump_in": str(dbg / f"in_{ts}.png"),
         "dump_overlay": str(dbg / f"overlay_{ts}.png"),
+        "ts": str(ts),
+        "partial_sheet": len(by_card) < 3,
         "warped": bool(warped)}}
 
 
