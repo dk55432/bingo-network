@@ -107,9 +107,63 @@ orange; green). `GET /scan-debug-in/{ts}.png` serves the tap image for the assis
 - First/last row of each card are structurally smaller/larger (band detection doesn't perfectly align with the grid); the 3 middle rows are now well-aligned.
 - CPU-only training is slow; a dedicated machine (e.g. Raspberry Pi) is the intended host.
 
-## Migration checklist (if moving hosts)
+## Migration to a new host (e.g. Raspberry Pi)
 
-In git (portable via `git clone`/`git fetch`): all code + `cell_classifier_phone.pth`.
-**NOT in git (gitignored) — must copy manually to retrain on the new host:**
-`phone_sheets/`, `phone_sheets3/`, `learning_cells/` from this Mac. `learning_backups/`
-have the corpus tarballs too. For running inference only, the committed `.pth` is enough.
+In git (portable via `git clone`/`git fetch`): all code + `cell_classifier_phone.pth` +
+`scan_card_numbers.txt` (ground truth). After a clone + `pip install`, the scanner
+runs immediately — the trained `.pth` is enough for inference.
+
+**NOT in git (gitignored) — must be copied manually to retrain on the new host:**
+- `phone_sheets/`  (30 photos, batch A)
+- `phone_sheets3/` (30 photos, batch B; sheet 1 excluded by the retrainer)
+- `learning_cells/` (the confirmed-cell corpus — grow it on the new host)
+
+Safe to leave behind: `phone_sheets2/` (not used by `train_phone_cells.build()`),
+`learning_backups/` (older corpus tarballs, only for rollback), `scans/` (old
+tesseract-era output, unused by the CNN server).
+
+Copy from the old host (this Mac) to the Pi (`pi@<ip>`, path `~/bingo-network/`):
+
+```bash
+ssh pi@<ip> 'mkdir -p ~/bingo-network/01_CNN_refactor'
+# from the old host's 01_CNN_refactor/:
+tar -C . -czf - phone_sheets phone_sheets3 learning_cells \
+  | ssh pi@<ip> 'mkdir -p ~/bingo-network/01_CNN_refactor && tar -C ~/bingo-network/01_CNN_refactor -xzf -'
+```
+
+Verify:
+```bash
+ssh pi@<ip> 'for d in phone_sheets phone_sheets3 learning_cells; do
+  echo "$d: $(ls ~/bingo-network/01_CNN_refactor/$d | wc -l) entries"; done'
+# expect 30 / 30 / 75
+```
+
+Set up Python deps on the new host (the repo `.venv` is not portable). The CNN
+reader and retrainer need **torch + torchvision, which are NOT in
+`requirements.txt`** — install them explicitly. On the Mac they were
+torch 2.2.2 / torchvision 0.17.2 (CPU-only). For a CPU-only machine install the
+CPU wheel (much smaller than the CUDA build):
+
+```bash
+cd ~/bingo-network
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+```
+
+Without torch installed, `READER=cnn` will fail at import — the tesseract
+(`default`) reader works without it.
+
+Run the server on the new host with READER=cnn:
+
+```bash
+cd ~/bingo-network
+READER=cnn .venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+Retrain on the new host (confirm you copied the three dirs first):
+
+```bash
+cd ~/bingo-network/01_CNN_refactor
+../.venv/bin/python train_learning.py
+```
