@@ -152,26 +152,47 @@ def _card_y_extent(gray, top, hint_bottom):
     return min(hint_bottom, top + int(below[-1]) + 2)
 
 
+def _grid_dip(gray, x0, x1, top, bottom, strip_w=12):
+    """Per-row brightness-dip score in a narrow vertical strip centred on
+    the card's column extent.  Printed grid lines are thin dark horizontal
+    rows that are much darker than their neighbours; a full-width mean
+    dilutes them into noise, but a narrow strip preserves the signal."""
+    H = gray.shape[0]
+    xm = (x0 + x1) // 2
+    xL = max(0, xm - strip_w // 2)
+    xR = min(gray.shape[1], xm + strip_w // 2)
+    strip = gray[top:bottom, xL:xR].mean(axis=1).astype(np.float64)
+    n = len(strip)
+    score = np.zeros(n)
+    for j in range(5, n - 5):
+        neighbours = np.concatenate([strip[j - 5:j - 1], strip[j + 2:j + 6]])
+        score[j] = neighbours.mean() - strip[j]
+    full = np.zeros(H)
+    full[top:top + n] = score
+    return full
+
+
 def _sheet_to_cells_with_boxes(
         img, boxes, verbose=False, return_geometry=False):
     """Shared per-card cell extraction for a list of (x0, y0, x1, y1) band
     boxes (card top, fallback estimate) plus bright-paper extent per card
     for the column bounds.  Equal-division rows/cols are snapped toward
-    the darkest nearby line (the printed grid rules) in the grayscale. No
-    thin-line detection needed beyond that local snap."""
+    the printed grid rules detected as thin dark horizontal lines via a
+    brightness-dip signal in a narrow strip (full-width means dilute the
+    thin lines into noise)."""
     if not boxes:
         return []
     H, W = img.shape[:2]
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    dark_row = (255.0 - gray).mean(axis=1)
     cells_out = []
     for i, (x0, y0, x1, y1) in enumerate(boxes):
         top = y1 + 2
         bottom = boxes[i + 1][1] if i + 1 < len(boxes) else H
         if i + 1 == len(boxes):
             bottom = _card_y_extent(gray, top, bottom)
+        grid_sig = _grid_dip(gray, x0, x1, top, bottom)
         rb = [top + (bottom - top) * k // 5 for k in range(6)]
-        rb = _snap(rb, dark_row, top, bottom, radius=28)
+        rb = _snap(rb, grid_sig, top, bottom, radius=40)
         cb = [x0 + (x1 - x0) * k // 5 for k in range(6)]
         if verbose:
             print(f"card{i + 1}: band ({x0},{y0})-({x1},{y1}) "
