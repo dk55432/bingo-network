@@ -117,20 +117,33 @@ def _header_hue_spec(img):
             candidates.append((score, -idx, (hl, hh, s_min, v_min, rowfrac)))
     if candidates:
         return max(candidates)[2]
-    best, best_score = None, -1
+    # Nothing clearly sheet-like yet.  The raw-score and dominant-hue
+    # fallbacks exist so unseen print colors still get a chance, but they
+    # only count if the bands they produce are themselves structurally
+    # plausible (1 or 3 uniform, evenly-spaced bands).  Otherwise return
+    # None so the caller raises an actionable retake error — gray sheets
+    # photographed small/underlit are genuinely indistinguishable from the
+    # warm surroundings, and reading the desk as "cards" is worse than
+    # asking for a better photo.
+    fallbacks = []
     for (hl, hh), s_min, v_min, rowfrac in _BAND_FAMILIES[1:]:
         bands = _mask_bands(_hue_in(h, hl, hh) & (s > s_min) & (v > v_min),
                             rowfrac)
-        score = _band_score(bands)
-        if score > best_score:
-            best_score, best = score, (hl, hh, s_min, v_min, rowfrac)
-    if best is not None and best_score > 0:
-        return best
+        score, ok = _sheet_structure(bands)
+        if ok:
+            fallbacks.append((score, (hl, hh, s_min, v_min, rowfrac)))
+    if fallbacks:
+        return max(fallbacks)[1]
     sat = (s > 45) & (v > 45)
     if sat.sum() < 0.01 * img.shape[0] * img.shape[1]:
         return None
     dom = int(np.bincount(h[sat].ravel()).argmax())
-    return ((dom - 20) % 180, (dom + 20) % 180, 45, 45, 0.12)
+    adaptive = ((dom - 20) % 180, (dom + 20) % 180, 45, 45, 0.12)
+    bands = _mask_bands(_hue_in(h, dom - 20, dom + 20) & (s > 45) & (v > 45),
+                        0.12)
+    if _sheet_structure(bands)[1]:
+        return adaptive
+    return None
 
 
 def _sheet_structure(bands):

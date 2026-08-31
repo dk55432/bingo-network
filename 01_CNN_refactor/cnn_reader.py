@@ -302,7 +302,9 @@ def _structure_ok(bboxes):
     """
     n = len(bboxes)
     if n == 0:
-        return False, "no teal bands detected"
+        return False, ("no header bands detected - reframe so the sheet "
+                       "fills the frame (all 3 cards, flat and top-lit) "
+                       "and try again")
     if n == 1:
         return True, ""
     if n > 3:
@@ -357,7 +359,9 @@ def _read_sheet(model, sheet_bgr):
             "val_med": round(float(hue[3]))}}
     if not by_card:
         hue = _teal_hue_stats(sheet_bgr)
-        return {"cards": [], "error": "no teal bands detected", "debug": {
+        return {"cards": [], "error": ("no header bands detected - reframe "
+                "so the sheet fills the frame (all 3 cards, flat and "
+                "top-lit) and try again"), "debug": {
             "dump_in": str(dbg / f"in_{ts}.png"),
             "dump_overlay": str(dbg / f"overlay_{ts}.png"),
             "hue_med": round(float(hue[0])),
