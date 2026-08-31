@@ -77,6 +77,8 @@ def build():
              "valid": {"ok": 0, "blank": 0, "no_truth": 0}}
     for src, skip, pre in BATCHES:
         for path in sorted(src.glob("*.jpeg")):
+            if path.name.startswith("._"):
+                continue
             m = re.search(r"(\d+)(?=\.jpe?g$)", path.name)
             if not m:
                 continue
