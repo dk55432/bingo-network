@@ -14,8 +14,10 @@ to numbers: ImageFolder.classes is lexicographically sorted, so class
 index i corresponds to the i-th smallest label, with index 0 unused.
 """
 
+import datetime as _dt
 import shutil
 import sys
+import tarfile
 from pathlib import Path
 
 import torch
@@ -34,10 +36,32 @@ from train_phone_cells import (  # noqa: E402
 )
 
 LEARNING = Path(__file__).parent / "learning_cells"
+BACKUP_DIR = Path(__file__).parent / "learning_backups"
 CKPT = Path(__file__).parent / "cell_classifier_phone.pth"
 EPOCHS = 30
 LR = 1e-4
 BATCH = 32
+
+
+def backup_learning():
+    """Snapshot learning_cells into learning_backups/learning_<ts>.tar.gz
+    so the confirmed corpus can be restored/reused later, e.g. for longer
+    training runs.  The backup archives the labels via the directory
+    structure (learning_cells/<number>/<cell>.jpg).  Keeps the last 20."""
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    if not LEARNING.is_dir():
+        return None
+    cells = list(LEARNING.rglob("*.jpg"))
+    if not cells:
+        return None
+    ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    dest = BACKUP_DIR / f"learning_{ts}.tar.gz"
+    with tarfile.open(dest, "w:gz") as tar:
+        tar.add(LEARNING, arcname=LEARNING.name)
+    arch = sorted(BACKUP_DIR.glob("learning_*.tar.gz"))
+    for old in arch[:-20]:
+        old.unlink()
+    return dest
 
 
 def merge_learning():
@@ -66,6 +90,8 @@ def main():
         raise SystemExit(f"no checkpoint to fine-tune from: {CKPT}")
 
     build()
+    backup = backup_learning()
+    print(f"learning cells backed up -> {backup}")
     merged = merge_learning()
     if merged == 0:
         print("WARNING: no confirmed learning cells yet — training is a no-"
