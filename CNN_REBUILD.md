@@ -114,6 +114,16 @@ orange; green). `GET /scan-debug-in/{ts}.png` serves the tap image for the assis
 
 ## Migration to a new host (e.g. Raspberry Pi)
 
+> **Status: the migration is DONE — the Raspberry Pi (`pi@slice-of-pi`,
+> `~/bingo-network/`) is now the canonical training host.** The Mac's copies of
+> `cell_classifier_phone.pth` and `learning_cells/` are STALE relative to the
+> Pi's — treat the Pi as the source of truth for the model + corpus. The Pi also
+> has the current `cell_classifier_phone.pth` checked in to git. The
+> `requirements.txt` at the repo root was regenerated on the Pi with
+> `pip freeze > requirements.txt` AFTER manually installing torch/torchvision
+> (CPU), so it now includes torch — unlike the version this doc originally
+> described.
+
 In git (portable via `git clone`/`git fetch`): all code + `cell_classifier_phone.pth` +
 `scan_card_numbers.txt` (ground truth). After a clone + `pip install`, the scanner
 runs immediately — the trained `.pth` is enough for inference.
@@ -144,15 +154,20 @@ ssh pi@<ip> 'for d in phone_sheets phone_sheets3 learning_cells; do
 ```
 
 Set up Python deps on the new host (the repo `.venv` is not portable). The CNN
-reader and retrainer need **torch + torchvision, which are NOT in
-`requirements.txt`** — install them explicitly. On the Mac they were
-torch 2.2.2 / torchvision 0.17.2 (CPU-only). For a CPU-only machine install the
-CPU wheel (much smaller than the CUDA build):
+reader and retrainer need **torch + torchvision**. These are NOT declared as
+first-class deps in `pubspec`-style (they were originally absent from
+`requirements.txt`), but `requirements.txt` at the repo root was regenerated on
+the Pi with `pip freeze`, so it now includes torch/torchvision (CPU wheel)
+pinned to the Pi's versions. This doc's note stands as the historical gotcha:
+torch is a heavy, CPU-vs-CUDA-sensitive dependency, so if `pip install -r
+requirements.txt` on a fresh CPU-only host pulls a CUDA build or nothing, install
+the CPU wheel explicitly:
 
 ```bash
 cd ~/bingo-network
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
+# if torch is missing or you want the small CPU-only build:
 .venv/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 ```
 
