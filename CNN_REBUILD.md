@@ -118,11 +118,11 @@ orange; green). `GET /scan-debug-in/{ts}.png` serves the tap image for the assis
 > `~/bingo-network/`) is now the canonical training host.** The Mac's copies of
 > `cell_classifier_phone.pth` and `learning_cells/` are STALE relative to the
 > Pi's — treat the Pi as the source of truth for the model + corpus. The Pi also
-> has the current `cell_classifier_phone.pth` checked in to git. The
-> `requirements.txt` at the repo root was regenerated on the Pi with
-> `pip freeze > requirements.txt` AFTER manually installing torch/torchvision
-> (CPU), so it now includes torch — unlike the version this doc originally
-> described.
+> has the current `cell_classifier_phone.pth` checked in to git. The Pi's
+> `requirements.txt` was at one point overwritten with a system-wide
+> `pip freeze > requirements.txt` (insider the venv mistake) — that has since
+> been replaced with a clean direct-deps manifest (see the Python deps section
+> below).
 
 In git (portable via `git clone`/`git fetch`): all code + `cell_classifier_phone.pth` +
 `scan_card_numbers.txt` (ground truth). After a clone + `pip install`, the scanner
@@ -153,23 +153,31 @@ ssh pi@<ip> 'for d in phone_sheets phone_sheets3 learning_cells; do
 # expect 30 / 30 / 75
 ```
 
-Set up Python deps on the new host (the repo `.venv` is not portable). The CNN
-reader and retrainer need **torch + torchvision**. These are NOT declared as
-first-class deps in `pubspec`-style (they were originally absent from
-`requirements.txt`), but `requirements.txt` at the repo root was regenerated on
-the Pi with `pip freeze`, so it now includes torch/torchvision (CPU wheel)
-pinned to the Pi's versions. This doc's note stands as the historical gotcha:
-torch is a heavy, CPU-vs-CUDA-sensitive dependency, so if `pip install -r
-requirements.txt` on a fresh CPU-only host pulls a CUDA build or nothing, install
-the CPU wheel explicitly:
+Set up Python deps on the new host (the repo `.venv` is not portable).
+`requirements.txt` at the repo root is a **clean direct-deps manifest** (hand
+curated — fastapi, uvicorn, python-multipart, pydantic, jinja2, websockets,
+numpy, pillow, opencv-python-headless, pytesseract, scikit-learn, scipy).
+
+The CNN reader and retrainer additionally need **torch + torchvision**, which are
+NOT in `requirements.txt` (they're CPU-vs-CUDA-sensitive and pulled from a
+dedicated wheel index). Install the small CPU build explicitly:
 
 ```bash
 cd ~/bingo-network
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-# if torch is missing or you want the small CPU-only build:
 .venv/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 ```
+
+**Venv hygiene (learned the hard way on the Pi):** always install/run through the
+venv — use `.venv/bin/pip`, `.venv/bin/python`, and `.venv/bin/uvicorn` (or
+`.venv/bin/activate`). Do NOT run bare `pip`/`python -m pip`/`pip freeze`, which
+hit the system Python and both pollute the whole OS with project packages AND
+dump Debian system packages into `requirements.txt` (that happened once; the
+resulting 323-line freeze was replaced with the clean manifest above). If you
+ever blunder the venv again, rebuild it fresh:
+`rm -rf .venv && python3 -m venv .venv && .venv/bin/pip install -r
+requirements.txt` (+ the torch line) and re-copy the three gitignored data dirs.
 
 Without torch installed, `READER=cnn` will fail at import — the tesseract
 (`default`) reader works without it.
