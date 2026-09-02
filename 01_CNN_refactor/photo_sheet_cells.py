@@ -173,13 +173,18 @@ def _grid_dip(gray, x0, x1, top, bottom, strip_w=12):
     return full
 
 
-def _grid_dip_v(gray, x0, x1, top, bottom, strip_h=12):
-    """Per-column brightness-dip score in a narrow horizontal strip centred
-    on the card's row extent.  Mirrors _grid_dip for vertical grid lines."""
+def _grid_dip_v(gray, x0, x1, top, bottom, strip_h=None):
+    """Per-column brightness-dip score across the full card height.
+    Vertical grid lines are continuous dark lines spanning the card;
+    digit strokes are localized to rows. Averaging over full height
+    suppresses digit strokes while preserving grid lines."""
     W = gray.shape[1]
-    ym = (top + bottom) // 2
-    yL = max(0, ym - strip_h // 2)
-    yR = min(gray.shape[0], ym + strip_h // 2)
+    if strip_h is None:
+        yL, yR = top, bottom  # full card height
+    else:
+        ym = (top + bottom) // 2
+        yL = max(0, ym - strip_h // 2)
+        yR = min(gray.shape[0], ym + strip_h // 2)
     strip = gray[yL:yR, x0:x1].mean(axis=0).astype(np.float64)
     n = len(strip)
     score = np.zeros(n)
@@ -269,21 +274,19 @@ def _sheet_to_cells_with_boxes(
                         peaks_v[-1] = x
                     continue
                 peaks_v.append(x)
-        # Fit uniform 5-column lattice: estimate pitch from median peak spacing,
-        # then project from x0. This avoids skew from peaks clustered on one side.
-        if len(peaks_v) >= 3:
-            spacings = np.diff(np.array(peaks_v))
-            pitch = float(np.median(spacings))
-            # Clamp pitch to reasonable range (70-120px for bingo cards)
-            pitch = max(70, min(120, pitch))
-            # Project from x0 with this pitch
-            cb = [int(round(x0 + pitch * k)) for k in range(6)]
-            # Nudge so right edge lands near x1 (distribute error evenly)
-            err = cb[-1] - x1
-            if abs(err) > 5:
-                cb = [int(round(cb[k] - err * k / 5)) for k in range(6)]
+        # Fit uniform 5-column lattice using the pipeline's _cell_boundaries:
+        # equal-division guesses snapped to detected vertical grid lines.
+        # Select the 4 strongest interior peaks (we expect 4 grid lines).
+        from pipeline import _cell_boundaries
+        if len(peaks_v) >= 4:
+            peak_strengths = [v[p - x0] for p in peaks_v]
+            top4 = np.argsort(peak_strengths)[::-1][:4]
+            strong = sorted([peaks_v[i] for i in top4])
         else:
-            cb = [x0 + (x1 - x0) * k // 5 for k in range(6)]
+            strong = peaks_v
+        width = x1 - x0
+        cb = _cell_boundaries(strong, width, tol_frac=0.35)
+        cb = [x0 + x for x in cb]
 
         # ---- ROWS: dip + snap, then enforce uniform lattice on snapped boundaries ----
         # (snap already done above for rb)
