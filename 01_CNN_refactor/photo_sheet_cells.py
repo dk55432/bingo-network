@@ -26,6 +26,7 @@ from extract_scan_cells import (  # noqa: E402
     _BAND_FAMILIES,
     _header_hue_spec,
     _hue_in,
+    find_header_bands,
 )
 
 
@@ -172,14 +173,70 @@ def _grid_dip(gray, x0, x1, top, bottom, strip_w=12):
     return full
 
 
+def _grid_dip_v(gray, x0, x1, top, bottom, strip_h=12):
+    """Per-column brightness-dip score in a narrow horizontal strip centred
+    on the card's row extent.  Mirrors _grid_dip for vertical grid lines."""
+    W = gray.shape[1]
+    ym = (top + bottom) // 2
+    yL = max(0, ym - strip_h // 2)
+    yR = min(gray.shape[0], ym + strip_h // 2)
+    strip = gray[yL:yR, x0:x1].mean(axis=0).astype(np.float64)
+    n = len(strip)
+    score = np.zeros(n)
+    for j in range(5, n - 5):
+        neighbours = np.concatenate([strip[j - 5:j - 1], strip[j + 2:j + 6]])
+        score[j] = neighbours.mean() - strip[j]
+    full = np.zeros(W)
+    full[x0:x0 + n] = score
+    return full
+
+
+def _find_grid_lines_phone(card_img, verbose=False):
+    """Phone-photo variant of find_grid_line_positions with relaxed params.
+    Phone photos have fainter grid lines; lower thresholds and shorter min length.
+    """
+    from pipeline import _cluster_1d, _select_best_lines
+    gray = cv2.cvtColor(card_img, cv2.COLOR_BGR2GRAY)
+    # Lower Canny thresholds for fainter lines
+    edges = cv2.Canny(gray, 30, 100)
+    h, w = edges.shape
+
+    # More permissive: shorter min length (8% vs 15%), lower Hough threshold
+    lines = cv2.HoughLinesP(
+        edges, 1, np.pi / 180, threshold=30,
+        minLineLength=int(w * 0.08), maxLineGap=50,
+    )
+
+    horiz_ys, vert_xs = [], []
+    if lines is not None:
+        for x1, y1, x2, y2 in lines.reshape(-1, 4):
+            dx, dy = x2 - x1, y2 - y1
+            length = (dx ** 2 + dy ** 2) ** 0.5
+            if abs(dy) <= 5 and length >= w * 0.08:
+                horiz_ys.append((y1 + y2) // 2)
+            elif abs(dx) <= 5 and length >= h * 0.08:
+                vert_xs.append((x1 + x2) // 2)
+
+    horiz_clusters = _cluster_1d(horiz_ys, tol=h * 0.02)
+    vert_clusters = _cluster_1d(vert_xs, tol=w * 0.02)
+
+    h_margin = h * 0.03
+    w_margin = w * 0.03
+    horiz_clusters = [(y, c) for y, c in horiz_clusters if h_margin < y < h - h_margin]
+    vert_clusters = [(x, c) for x, c in vert_clusters if w_margin < x < w - w_margin]
+
+    horiz_ys = _select_best_lines(horiz_clusters)
+    vert_xs = _select_best_lines(vert_clusters)
+    if verbose:
+        print(f"  phone Hough: h={len(horiz_ys)} v={len(vert_xs)} lines")
+    return horiz_ys, vert_xs
+
+
 def _sheet_to_cells_with_boxes(
         img, boxes, verbose=False, return_geometry=False):
-    """Shared per-card cell extraction for a list of (x0, y0, x1, y1) band
-    boxes (card top, fallback estimate) plus bright-paper extent per card
-    for the column bounds.  Equal-division rows/cols are snapped toward
-    the printed grid rules detected as thin dark horizontal lines via a
-    brightness-dip signal in a narrow strip (full-width means dilute the
-    thin lines into noise)."""
+    """Shared per-card cell extraction.  Rows use the proven brightness-dip
+    + snap (robust on normalized phone images).  Columns use vertical dip
+    peaks + uniform lattice fit (enforces 5 evenly-spaced columns)."""
     if not boxes:
         return []
     H, W = img.shape[:2]
@@ -190,14 +247,52 @@ def _sheet_to_cells_with_boxes(
         bottom = boxes[i + 1][1] if i + 1 < len(boxes) else H
         if i + 1 == len(boxes):
             bottom = _card_y_extent(gray, top, bottom)
+        if bottom - top < 60 or x1 - x0 < 60:
+            if verbose:
+                print(f"card{i + 1}: region too thin ({bottom - top}x{x1 - x0})")
+            continue
+
+        # ---- ROWS: proven dip + snap ----
         grid_sig = _grid_dip(gray, x0, x1, top, bottom)
         rb = [top + (bottom - top) * k // 5 for k in range(6)]
         rb = _snap(rb, grid_sig, top, bottom, radius=40)
-        cb = [x0 + (x1 - x0) * k // 5 for k in range(6)]
+
+        # ---- COLUMNS: vertical dip peaks + uniform lattice fit ----
+        # Detect vertical dip peaks in a narrow horizontal strip centered on card
+        grid_sig_v = _grid_dip_v(gray, x0, x1, top, bottom)
+        # Find peaks in the vertical dip signal (local maxima = dark vertical lines)
+        v = grid_sig_v[x0:x1]
+        peaks_v = []
+        for x in range(x0 + 8, x1 - 8):
+            if v[x - x0] == v[x - x0 - 8:x - x0 + 8].max() and v[x - x0] > 0.5:
+                if peaks_v and x - peaks_v[-1] < 20:
+                    if v[x - x0] > v[peaks_v[-1] - x0]:
+                        peaks_v[-1] = x
+                    continue
+                peaks_v.append(x)
+        # Fit uniform 5-column lattice to detected peaks
+        if len(peaks_v) >= 4:
+            # Linear fit: peak_x = a * index + b for index 1..4 (interior lines)
+            idx = np.array([1, 2, 3, 4], float)
+            # Select the 4 most prominent peaks (by signal strength) and sort
+            if len(peaks_v) > 4:
+                strengths = [v[p - x0] for p in peaks_v]
+                top4 = np.argsort(strengths)[::-1][:4]
+                peaks_v = sorted([peaks_v[i] for i in top4])
+            pr = np.array(peaks_v[:4], float)
+            a, b = np.polyfit(idx, pr, 1)
+            pitch = a
+            # Project full 6 boundaries from the fitted lattice
+            cb = [int(round(b + a * k)) for k in range(6)]
+        else:
+            # Fallback: equal division
+            cb = [x0 + (x1 - x0) * k // 5 for k in range(6)]
+
         if verbose:
             print(f"card{i + 1}: band ({x0},{y0})-({x1},{y1}) "
                   f"card top={top} bottom={bottom} "
                   f"rows={rb} cols={cb}")
+
         for r in range(5):
             for c in range(5):
                 yA, yB, xA, xB = rb[r], rb[r + 1], cb[c], cb[c + 1]
