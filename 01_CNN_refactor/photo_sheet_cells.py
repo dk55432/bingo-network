@@ -257,10 +257,9 @@ def _sheet_to_cells_with_boxes(
         rb = [top + (bottom - top) * k // 5 for k in range(6)]
         rb = _snap(rb, grid_sig, top, bottom, radius=40)
 
-        # ---- COLUMNS: vertical dip peaks + uniform lattice fit ----
+        # ---- COLUMNS: vertical dip peaks + uniform lattice from median pitch ----
         # Detect vertical dip peaks in a narrow horizontal strip centered on card
         grid_sig_v = _grid_dip_v(gray, x0, x1, top, bottom)
-        # Find peaks in the vertical dip signal (local maxima = dark vertical lines)
         v = grid_sig_v[x0:x1]
         peaks_v = []
         for x in range(x0 + 8, x1 - 8):
@@ -270,23 +269,32 @@ def _sheet_to_cells_with_boxes(
                         peaks_v[-1] = x
                     continue
                 peaks_v.append(x)
-        # Fit uniform 5-column lattice to detected peaks
-        if len(peaks_v) >= 4:
-            # Linear fit: peak_x = a * index + b for index 1..4 (interior lines)
-            idx = np.array([1, 2, 3, 4], float)
-            # Select the 4 most prominent peaks (by signal strength) and sort
-            if len(peaks_v) > 4:
-                strengths = [v[p - x0] for p in peaks_v]
-                top4 = np.argsort(strengths)[::-1][:4]
-                peaks_v = sorted([peaks_v[i] for i in top4])
-            pr = np.array(peaks_v[:4], float)
-            a, b = np.polyfit(idx, pr, 1)
-            pitch = a
-            # Project full 6 boundaries from the fitted lattice
-            cb = [int(round(b + a * k)) for k in range(6)]
+        # Fit uniform 5-column lattice: estimate pitch from median peak spacing,
+        # then project from x0. This avoids skew from peaks clustered on one side.
+        if len(peaks_v) >= 3:
+            spacings = np.diff(np.array(peaks_v))
+            pitch = float(np.median(spacings))
+            # Clamp pitch to reasonable range (70-120px for bingo cards)
+            pitch = max(70, min(120, pitch))
+            # Project from x0 with this pitch
+            cb = [int(round(x0 + pitch * k)) for k in range(6)]
+            # Nudge so right edge lands near x1 (distribute error evenly)
+            err = cb[-1] - x1
+            if abs(err) > 5:
+                cb = [int(round(cb[k] - err * k / 5)) for k in range(6)]
         else:
-            # Fallback: equal division
             cb = [x0 + (x1 - x0) * k // 5 for k in range(6)]
+
+        # ---- ROWS: dip + snap, then enforce uniform lattice on snapped boundaries ----
+        # (snap already done above for rb)
+        # Fit uniform lattice to the 4 snapped interior boundaries to correct
+        # any single-boundary mis-snap (e.g. merged rows)
+        if len(rb) == 6:
+            idx = np.array([0, 1, 2, 3, 4, 5], float)
+            a, b = np.polyfit(idx, np.array(rb, float), 1)
+            pitch_r = a
+            pitch_r = max(70, min(120, pitch_r))
+            rb = [int(round(b + a * k)) for k in range(6)]
 
         if verbose:
             print(f"card{i + 1}: band ({x0},{y0})-({x1},{y1}) "
