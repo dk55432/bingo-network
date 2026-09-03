@@ -294,16 +294,37 @@ def card_result(numbers, confs):
     return {"grid": grid, "needs_review": needs_review}
 
 
+def _scale_boxes(boxes, orig_shape, new_shape):
+    """Scale box coordinates from original image to normalized image."""
+    oh, ow = orig_shape[:2]
+    nh, nw = new_shape[:2]
+    sx, sy = nw / ow, nh / oh
+    scaled = []
+    for x0, y0, x1, y1 in boxes:
+        scaled.append((int(x0 * sx), int(y0 * sy), int(x1 * sx), int(y1 * sy)))
+    return scaled
+
+
 def read_sheet_bytes(model, data, forced_bands=None):
     """Read a full photo (raw bytes) -> server-shaped /scan-card payload.
     forced_bands: 3 y-rows (user taps) pinning each card's header band."""
-    return _read_sheet(model, _normalize(load_photo_bytes(data)), forced_bands)
+    orig = load_photo_bytes(data)
+    # Detect card geometry on ORIGINAL image (before normalization)
+    # because normalization changes color statistics and breaks header detection.
+    from photo_sheet_cells import teal_card_bboxes
+    orig_boxes = teal_card_bboxes(orig) if not forced_bands else None
+    norm = _normalize(orig)
+    if orig_boxes is not None:
+        norm_boxes = _scale_boxes(orig_boxes, orig.shape, norm.shape)
+    else:
+        norm_boxes = None
+    return _read_sheet(model, norm, forced_bands, pre_boxes=norm_boxes)
 
 
 def read_sheet_path(model, path):
     """Read a full photo from disk -> server-shaped /scan-card payload."""
-    return _read_sheet(model, _normalize(load_photo_bytes(
-        Path(path).read_bytes())))
+    data = Path(path).read_bytes()
+    return read_sheet_bytes(model, data)
 
 
 def _structure_ok(bboxes):
@@ -340,12 +361,17 @@ def _structure_ok(bboxes):
     return True, ""
 
 
-def _read_sheet(model, sheet_bgr, forced_bands=None):
+def _read_sheet(model, sheet_bgr, forced_bands=None, pre_boxes=None):
     """sheet_bgr (normalized full-sheet BGR) -> /scan-card payload.
 
     forced_bands: when the auto header-color detection fails (washed-out
     gray sheets), the caller supplies 3 tapped rows — one per card's band
     top — and the card geometry is pinned to those instead.
+
+    pre_boxes: pre-detected card header boxes [(x0,y0,x1,y1), ...] in
+    sheet_bgr's coordinate space. If provided, these are used instead of
+    running header detection on sheet_bgr (which may have degraded colors
+    from normalization).
 
     Always dumps the normalized input + a cell-box overlay to
     /tmp/cnn_reader_debug (with per-card ink/confidence stats) so any
@@ -354,6 +380,16 @@ def _read_sheet(model, sheet_bgr, forced_bands=None):
     sheet_bgr, warped = _warp_sheet(sheet_bgr)
     if forced_bands:
         by_card, bboxes = cells_from_forced(sheet_bgr, forced_bands)
+    elif pre_boxes is not None:
+        # Use pre-detected boxes (from original image, scaled to normalized)
+        from photo_sheet_cells import _sheet_to_cells_with_boxes
+        items = _sheet_to_cells_with_boxes(
+            sheet_bgr, pre_boxes, return_geometry=True)
+        by, boxes = {}, {}
+        for cid, r, c, cell, box in items:
+            by.setdefault(cid, {})[(r, c)] = cell
+            boxes.setdefault(cid, {})[(r, c)] = box
+        by_card, bboxes = by, boxes
     else:
         by_card, bboxes = cells_from(sheet_bgr)
     ts = int(time.time())

@@ -104,24 +104,42 @@ def teal_card_bboxes(img):
         else:
             merged.append([r[0], r[-1]])
     boxes = []
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    # Frame-level paper extent (hard constraint - paper can't be wider than this)
+    frame_ext = _frame_bright_extent(gray)
     for y0, y1 in merged:
         cols = np.where(teal[y0:y1 + 1, :].any(axis=0))[0]
         if cols.size == 0:
             continue
-        boxes.append((int(cols[0]), y0, int(cols[-1]), y1))
+        x0, x1 = int(cols[0]), int(cols[-1])
+
+        # Clamp horizontal extent to the paper's bright-paper region.
+        # The teal header color can bleed/reflect onto the desk, making
+        # the mask wider than the actual card. Use the card body region
+        # (just below the header) to find the true paper edges.
+        body_y0 = min(y1 + 2, gray.shape[0] - 1)
+        body_y1 = min(y1 + 60, gray.shape[0])
+        if body_y1 > body_y0:
+            body_band = gray[body_y0:body_y1, :]
+            colmean = body_band.mean(axis=0).astype(np.uint8)
+            thr, _ = cv2.threshold(colmean, 0, 255,
+                                   cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            bright = colmean > max(40, int(thr) * 0.90)
+            xs = np.where(bright)[0]
+            if xs.size > 0:
+                x0 = max(x0, int(xs[0]))
+                x1 = min(x1, int(xs[-1]))
+
+        # Also clamp to frame-level paper extent as a hard constraint.
+        # The header mask can bleed onto the desk; the full-frame paper
+        # detection is more reliable for the absolute outer bounds.
+        if frame_ext is not None:
+            fx0, fx1 = frame_ext
+            x0 = max(x0, fx0)
+            x1 = min(x1, fx1)
+
+        boxes.append((x0, y0, x1, y1))
     boxes = sorted(boxes, key=lambda b: b[1])
-    family_specs = {(hl, hh, s_min, v_min, rowfrac)
-                    for (hl, hh), s_min, v_min, rowfrac in _BAND_FAMILIES}
-    if spec not in family_specs:
-        # Last-resort (adaptive dominant-hue) masks cover the whole frame on
-        # washed photos, so the boxes poke off the sheet onto the table.
-        # Clamp them to the paper's bright column extent; real family masks
-        # are the printed color itself and stay untouched.
-        ext = _frame_bright_extent(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
-        if ext is not None:
-            x_left, x_right = ext
-            boxes = [(max(x0, x_left), y0, min(x1, x_right), y1)
-                     for x0, y0, x1, y1 in boxes]
     return boxes
 
 
@@ -240,53 +258,73 @@ def _find_grid_lines_phone(card_img, verbose=False):
 def _sheet_to_cells_with_boxes(
         img, boxes, verbose=False, return_geometry=False):
     """Shared per-card cell extraction.  Rows use the proven brightness-dip
-    + snap (robust on normalized phone images).  Columns use vertical dip
-    peaks + uniform lattice fit (enforces 5 evenly-spaced columns)."""
+    + snap (robust on normalized phone images).  Columns use pipeline Hough
+    on the full card width (from frame bright extent) + uniform lattice fit."""
     if not boxes:
         return []
     H, W = img.shape[:2]
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    
+    # Get frame-level paper extent once from grid regions below headers.
+    # This gives the true horizontal bounds of the card grid.
+    frame_ext = _frame_bright_extent(gray, boxes)
+    if frame_ext is not None:
+        grid_x0, grid_x1 = frame_ext
+    else:
+        grid_x0, grid_x1 = 0, W
+    
     cells_out = []
-    for i, (x0, y0, x1, y1) in enumerate(boxes):
+    for i, (hx0, y0, hx1, y1) in enumerate(boxes):
         top = y1 + 2
         bottom = boxes[i + 1][1] if i + 1 < len(boxes) else H
         if i + 1 == len(boxes):
             bottom = _card_y_extent(gray, top, bottom)
-        if bottom - top < 60 or x1 - x0 < 60:
+        if bottom - top < 60 or grid_x1 - grid_x0 < 60:
             if verbose:
-                print(f"card{i + 1}: region too thin ({bottom - top}x{x1 - x0})")
+                print(f"card{i + 1}: region too thin ({bottom - top}x{grid_x1 - grid_x0})")
             continue
+        
+        # Use header box for vertical position (y), but frame extent for horizontal (x)
+        x0, x1 = grid_x0, grid_x1
 
-        # ---- ROWS: proven dip + snap ----
+# ---- ROWS: proven dip + snap ----
         grid_sig = _grid_dip(gray, x0, x1, top, bottom)
         rb = [top + (bottom - top) * k // 5 for k in range(6)]
         rb = _snap(rb, grid_sig, top, bottom, radius=40)
 
-        # ---- COLUMNS: vertical dip peaks + uniform lattice from median pitch ----
-        # Detect vertical dip peaks in a narrow horizontal strip centered on card
-        grid_sig_v = _grid_dip_v(gray, x0, x1, top, bottom)
-        v = grid_sig_v[x0:x1]
-        peaks_v = []
-        for x in range(x0 + 8, x1 - 8):
-            if v[x - x0] == v[x - x0 - 8:x - x0 + 8].max() and v[x - x0] > 0.5:
-                if peaks_v and x - peaks_v[-1] < 20:
-                    if v[x - x0] > v[peaks_v[-1] - x0]:
-                        peaks_v[-1] = x
-                    continue
-                peaks_v.append(x)
-        # Fit uniform 5-column lattice using the pipeline's _cell_boundaries:
-        # equal-division guesses snapped to detected vertical grid lines.
-        # Select the 4 strongest interior peaks (we expect 4 grid lines).
-        from pipeline import _cell_boundaries
-        if len(peaks_v) >= 4:
-            peak_strengths = [v[p - x0] for p in peaks_v]
-            top4 = np.argsort(peak_strengths)[::-1][:4]
-            strong = sorted([peaks_v[i] for i in top4])
-        else:
-            strong = peaks_v
+        # ---- COLUMNS: pipeline Hough + pitch-fitted lattice (like rows) ----
+        card_crop = img[top:bottom, x0:x1]
+        _, vert_xs = find_grid_line_positions(card_crop)
+        # Fit pitch from detected vertical peaks using linear regression
+        # (same strategy as rows: fit pitch, then generate uniform boundaries)
+        vert_rel = vert_xs
         width = x1 - x0
-        cb = _cell_boundaries(strong, width, tol_frac=0.35)
-        cb = [x0 + x for x in cb]
+        interior_peaks = [p for p in vert_rel if 0.05 * width < p < 0.95 * width]
+        if len(interior_peaks) >= 2:
+            expected = np.array([width * k / 5 for k in range(1, 5)], dtype=float)
+            peaks_arr = np.array(interior_peaks, dtype=float)
+            idx = np.argmin(np.abs(peaks_arr[:, None] - expected[None, :]), axis=1)
+            matched = {}
+            for p, div_idx in zip(peaks_arr, idx):
+                if div_idx not in matched or abs(p - expected[div_idx]) < abs(matched[div_idx] - expected[div_idx]):
+                    matched[div_idx] = p
+            if len(matched) >= 2:
+                xs = np.array(list(matched.keys()), dtype=float)
+                ys = np.array(list(matched.values()), dtype=float)
+                a, b = np.polyfit(xs, ys, 1)
+                pitch = max(0.12 * width, min(0.28 * width, a))
+                cb_rel = [0]
+                for k in range(1, 5):
+                    guess = k * pitch
+                    tol = pitch * 0.35
+                    candidates = [p for p in vert_rel if abs(p - guess) <= tol]
+                    cb_rel.append(min(candidates, key=lambda p: abs(p - guess)) if candidates else round(guess))
+                cb_rel.append(width)
+            else:
+                cb_rel = [round(width * k / 5) for k in range(6)]
+        else:
+            cb_rel = [round(width * k / 5) for k in range(6)]
+        cb = [x0 + x for x in cb_rel]
 
         # ---- ROWS: dip + snap, then enforce uniform lattice on snapped boundaries ----
         # (snap already done above for rb)
@@ -326,10 +364,48 @@ def sheet_to_cells_teal(img, verbose=False, return_geometry=False):
         img, teal_card_bboxes(img), verbose, return_geometry)
 
 
-def _frame_bright_extent(gray):
-    """Sheet's bright-paper column extent over the whole frame, used to
-    seed the column bounds when no header color is detectable."""
-    colmean = gray.mean(axis=0).astype(np.uint8)
+def _frame_bright_extent(gray, header_boxes=None):
+    """Sheet's bright-paper column extent over the frame, used to
+    seed the column bounds when no header color is detectable.
+
+    If header_boxes are provided, examines the grid regions below
+    each header (where the actual bingo grids are) to find the true
+    paper extent. Uses the INTERSECTION of header box extents (not
+    union) so a single wide header box doesn't pull in the desk."""
+    h = gray.shape[0]
+    
+    if header_boxes is not None and len(header_boxes) > 0:
+        # Intersection of header box extents: max of left edges, min of right edges
+        header_x0 = max(b[0] for b in header_boxes)
+        header_x1 = min(b[2] for b in header_boxes)
+        
+        # Use grid regions below each header box within the intersection
+        grid_bands = []
+        for i, (hx0, hy0, hx1, hy1) in enumerate(header_boxes):
+            top = hy1 + 2
+            bottom = header_boxes[i + 1][1] if i + 1 < len(header_boxes) else h
+            if bottom - top > 30:
+                # Clamp grid band to header intersection
+                gx0, gx1 = header_x0, header_x1
+                grid_bands.append((top, bottom, gx0, gx1))
+        
+        if grid_bands:
+            # Combine all grid regions
+            combined_band = np.vstack([gray[top:bottom, gx0:gx1] for top, bottom, gx0, gx1 in grid_bands])
+            colmean = combined_band.mean(axis=0).astype(np.uint8)
+            
+            thr, _ = cv2.threshold(colmean, 0, 255,
+                                   cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            bright = colmean > max(40, int(thr) * 0.90)
+            xs = np.where(bright)[0]
+            if xs.size > 0:
+                # Return in full-image coordinates
+                return header_x0 + xs[0], header_x0 + xs[-1]
+    
+    # Fallback: middle third (original behavior)
+    y0, y1 = h // 3, 2 * h // 3
+    band = gray[y0:y1, :]
+    colmean = band.mean(axis=0).astype(np.uint8)
     thr, _ = cv2.threshold(colmean, 0, 255,
                            cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     bright = colmean > max(40, int(thr) * 0.90)

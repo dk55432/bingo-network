@@ -111,7 +111,7 @@ def _header_hue_spec(img):
     for idx, ((hl, hh), s_min, v_min, rowfrac) in enumerate(_BAND_FAMILIES[1:]):
         bands = _mask_bands(_hue_in(h, hl, hh) & (s > s_min) & (v > v_min),
                             rowfrac)
-        score, ok = _sheet_structure(bands)
+        score, ok = _sheet_structure(bands, img.shape[0])
         if ok:
             # (structure score, family priority, spec) — earlier families win ties
             candidates.append((score, -idx, (hl, hh, s_min, v_min, rowfrac)))
@@ -129,7 +129,7 @@ def _header_hue_spec(img):
     for (hl, hh), s_min, v_min, rowfrac in _BAND_FAMILIES[1:]:
         bands = _mask_bands(_hue_in(h, hl, hh) & (s > s_min) & (v > v_min),
                             rowfrac)
-        score, ok = _sheet_structure(bands)
+        score, ok = _sheet_structure(bands, img.shape[0])
         if ok:
             fallbacks.append((score, (hl, hh, s_min, v_min, rowfrac)))
     if fallbacks:
@@ -141,18 +141,22 @@ def _header_hue_spec(img):
     adaptive = ((dom - 20) % 180, (dom + 20) % 180, 45, 45, 0.12)
     bands = _mask_bands(_hue_in(h, dom - 20, dom + 20) & (s > 45) & (v > 45),
                         0.12)
-    if _sheet_structure(bands)[1]:
+    if _sheet_structure(bands, img.shape[0])[1]:
         return adaptive
     return None
 
 
-def _sheet_structure(bands):
+def _sheet_structure(bands, img_height=None):
     """Score a band layout's plausibility as a bingo sheet: 3 evenly
     spaced, similarly sized bands (a full strip) is the strong case;
     1 band (single card) is acceptable.  Returns (score, ok)."""
     if not bands:
         return 0.0, False
     if len(bands) == 1:
+        # Reject bands that span most of the image - those are adaptive
+        # hue fallbacks capturing the whole frame, not a real header.
+        if img_height and (bands[0][1] - bands[0][0]) > 0.5 * img_height:
+            return 0.0, False
         return 10.0, True
     if len(bands) == 3:
         tops = sorted(b[1] for b in bands)
