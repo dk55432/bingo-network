@@ -12,6 +12,7 @@ Because bingo numbers are sparse per class, expect modest accuracy at low
 data volumes; scaling photo count (30 sheets) is the plan.
 """
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -36,7 +37,7 @@ PHONE = Path(__file__).parent / "phone_sheets"
 PHONE3 = Path(__file__).parent / "phone_sheets3"
 DST = Path("/tmp/phone_cells_v2")
 FREE = (2, 2)
-SPLITS = {"train": range(1, 25), "valid": range(25, 31)}
+SPLITS = {"train": range(1, 25), "valid": range(25, 33)}
 # (source dir, sheet->include pairs to skip, prefix for filenames)
 BATCHES = [(PHONE, {}, "A"), (PHONE3, {1}, "B")]
 
@@ -71,7 +72,10 @@ class CellClassifier(DigitClassifier):
 
 def build():
     import shutil
-    shutil.rmtree(DST, ignore_errors=True)
+    import time
+    resume = os.environ.get("EXTRACT_RESUME") == "1"
+    if not resume:
+        shutil.rmtree(DST, ignore_errors=True)
     truth = parse_truth()
     stats = {"train": {"ok": 0, "blank": 0, "no_truth": 0},
              "valid": {"ok": 0, "blank": 0, "no_truth": 0}}
@@ -86,6 +90,11 @@ def build():
             if s in skip:
                 print(f"== SKIP {path.name} (bad frame)")
                 continue
+            sentinel = DST / f".done_{pre}_{path.stem}"
+            if resume and sentinel.exists():
+                print(f"== RESUME skip {path.name} (done)")
+                continue
+            t0 = time.time()
             split = next((k for k, nums in SPLITS.items() if s in nums), None)
             cells = sheet_to_cells_teal(normalize(load_photo(path)))
             by_card = {}
@@ -115,6 +124,9 @@ def build():
                         cv2.imwrite(str(d / f"{pre}_{path.stem}_c{cid}_r{r}c{c}.jpg"),
                                     cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY))
                         stats[split]["ok"] += 1
+            sentinel.parent.mkdir(parents=True, exist_ok=True)
+            sentinel.touch()
+            print(f"  cached {path.name} in {time.time() - t0:.1f}s", flush=True)
     for k, v in stats.items():
         print(f"{k}: {v}")
 

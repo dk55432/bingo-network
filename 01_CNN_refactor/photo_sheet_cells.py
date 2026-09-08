@@ -295,7 +295,7 @@ def _fix_row_lattice(rb, dip, top, bottom):
                 gg[j - 1] = arr[j + 1] - arr[j - 1]
                 gg.pop(j)
             else:
-                gg.pop(j)
+                gg.pop(0 if j == 0 else -1)
             gg = np.array(gg, float)
             pj = float(np.median(gg)) if gg.size else p
             impact.append(float(np.max(np.abs(gg - pj))) if gg.size else 0.0)

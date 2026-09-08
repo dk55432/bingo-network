@@ -54,14 +54,18 @@ device = torch.device(
 
 model = DigitClassifier().to(device)
 
-model.load_state_dict(
-    torch.load(
-        "digit_classifier.pth",
-        map_location=device
+try:
+    model.load_state_dict(
+        torch.load(
+            "digit_classifier.pth",
+            map_location=device,
+            weights_only=True,
+        )
     )
-)
-
-model.eval()
+    model.eval()
+except FileNotFoundError:
+    print("digit_classifier.pth not found; model left uninitialized "
+          "(only architecture available)")
 
 
 if __name__ == "__main__":
