@@ -140,6 +140,52 @@ def teal_card_bboxes(img):
 
         boxes.append((x0, y0, x1, y1))
     boxes = sorted(boxes, key=lambda b: b[1])
+    if len(boxes) == 1 and gray.shape[0] >= 1500:
+        extra = _faint_header_fallback(teal, boxes[0])
+        if extra:
+            boxes = sorted(extra, key=lambda b: b[1])
+    return boxes
+
+
+def _faint_header_fallback(teal, first_box):
+    """Recover the remaining card headers when a full strip registers only
+    one band.  Faint/narrow header prints still peak strongly INSIDE their
+    own x-window even when they lose the full-width per-row fraction, so
+    scan the detected band's columns for the top-3 strongly-separated teal
+    rows and rebuild one box per peak (uniform pitch check included)."""
+    x0, _, x1, _ = first_box
+    sub = teal[:, x0:x1].mean(axis=1).astype(np.float64)
+    sub = np.convolve(sub, np.ones(7) / 7, mode="same")
+    best = sub.max()
+    if best <= 0.01:
+        return []
+    peaks = []
+    for y in range(2, sub.size - 2):
+        if (sub[y] > 0.35 * best and sub[y] >= sub[y - 2]
+                and sub[y] >= sub[y - 1] and sub[y] >= sub[y + 1]
+                and sub[y] >= sub[y + 2]):
+            peaks.append((y, sub[y]))
+    peaks.sort(key=lambda p: -p[1])
+    kept = []
+    for y, _ in peaks:
+        if all(abs(y - k) >= 250 for k in kept):
+            kept.append(y)
+        if len(kept) == 3:
+            break
+    if len(kept) != 3:
+        return []
+    kept.sort()
+    pitches = [kept[i + 1] - kept[i] for i in range(2)]
+    if max(pitches) - min(pitches) > 0.28 * max(pitches):
+        return []
+    boxes = []
+    for pk in kept:
+        lo, hi = pk, pk
+        while lo > 2 and sub[lo - 1] >= 0.5 * sub[pk]:
+            lo -= 1
+        while hi < sub.size - 3 and sub[hi + 1] >= 0.5 * sub[pk]:
+            hi += 1
+        boxes.append((x0, lo, x1, hi))
     return boxes
 
 
