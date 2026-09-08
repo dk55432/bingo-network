@@ -13,11 +13,13 @@ data volumes; scaling photo count (30 sheets) is the plan.
 """
 
 import os
+import random
 import re
 import sys
 from pathlib import Path
 
 import cv2
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -44,6 +46,7 @@ BATCHES = [(PHONE, {}, "A"), (PHONE3, {1}, "B")]
 train_tf = transforms.Compose([
     transforms.Grayscale(num_output_channels=1),
     transforms.Resize((64, 64)),
+    transforms.ColorJitter(brightness=0.15, contrast=0.15),
     transforms.RandomRotation(5),
     transforms.RandomAffine(degrees=0, translate=(0.06, 0.06),
                             scale=(0.92, 1.08)),
@@ -64,9 +67,10 @@ class CellClassifier(DigitClassifier):
         super().__init__()
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(64 * 9, 64),
+            nn.Linear(64 * 9, 128),
             nn.ReLU(),
-            nn.Linear(64, ncls),
+            nn.Dropout(0.3),
+            nn.Linear(128, ncls),
         )
 
 
@@ -132,6 +136,9 @@ def build():
 
 
 def main():
+    torch.manual_seed(0)
+    np.random.seed(0)
+    random.seed(0)
     build()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -168,11 +175,18 @@ def main():
                                             DST / "train").classes) + 1).to(device)
     train_ds = ImageFolder(DST / "train", train_tf)
     valid_ds = ImageFolder(DST / "valid", test_tf)
-    tl = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=0)
+    from torch.utils.data import WeightedRandomSampler
+    cnt = {}
+    for _, lab in train_ds.samples:
+        cnt[lab] = cnt.get(lab, 0) + 1
+    weights = [1.0 / cnt[lab] for _, lab in train_ds.samples]
+    sampler = WeightedRandomSampler(weights, num_samples=len(weights),
+                                    replacement=True)
+    tl = DataLoader(train_ds, batch_size=32, shuffle=False, sampler=sampler)
     vl = DataLoader(valid_ds, batch_size=32, shuffle=False, num_workers=0)
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
-    sch = torch.optim.lr_scheduler.StepLR(opt, step_size=15, gamma=0.5)
-    for epoch in range(60):
+    sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=80)
+    for epoch in range(80):
         model.train()
         tot = corr = 0
         for imgs, labs in tl:
@@ -183,7 +197,8 @@ def main():
                 loss = (nn.functional.cross_entropy(t, labs // 10)
                         + nn.functional.cross_entropy(o, labs % 10))
             else:
-                loss = nn.functional.cross_entropy(model(imgs), labs)
+                loss = nn.functional.cross_entropy(
+                    model(imgs), labs, label_smoothing=0.1)
             loss.backward()
             opt.step()
             with torch.no_grad():

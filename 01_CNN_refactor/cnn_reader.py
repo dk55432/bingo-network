@@ -164,9 +164,10 @@ class CellClassifier(_ConvStack):
         super().__init__()
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(64 * 9, 64),
+            nn.Linear(64 * 9, 128),
             nn.ReLU(),
-            nn.Linear(64, ncls),
+            nn.Dropout(0.3),
+            nn.Linear(128, ncls),
         )
 
     def forward(self, x):
