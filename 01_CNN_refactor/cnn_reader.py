@@ -217,8 +217,13 @@ def cells_from_forced(sheet_bgr, band_tops):
 
 
 def cell_logits(model, cell_bgr):
-    """(75,) float32 logits for one BGR cell."""
-    gray = cv2.cvtColor(cell_bgr, cv2.COLOR_BGR2GRAY)
+    """(75,) float32 logits for one BGR or grayscale cell."""
+    if cell_bgr.ndim == 3 and cell_bgr.shape[2] == 3:
+        gray = cv2.cvtColor(cell_bgr, cv2.COLOR_BGR2GRAY)
+    elif cell_bgr.ndim == 2:
+        gray = cell_bgr
+    else:
+        raise ValueError(f"Expected 2D or 3D image, got shape {cell_bgr.shape}")
     pil = Image.fromarray(gray)
     x = cell_transform(pil).unsqueeze(0).to(DEVICE)
     with torch.no_grad():
@@ -318,6 +323,12 @@ def read_sheet_bytes(model, data, forced_bands=None):
         norm_boxes = _scale_boxes(orig_boxes, orig.shape, norm.shape)
     else:
         norm_boxes = None
+    # If original detection found fewer than 3 cards, try detecting on
+    # normalized image (normalization can reveal faded headers).
+    if norm_boxes is not None and len(norm_boxes) < 3:
+        norm_detected = teal_card_bboxes(norm)
+        if len(norm_detected) > len(norm_boxes):
+            norm_boxes = norm_detected
     return _read_sheet(model, norm, forced_bands, pre_boxes=norm_boxes)
 
 

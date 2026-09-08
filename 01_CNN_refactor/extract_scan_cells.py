@@ -105,8 +105,25 @@ def _header_hue_spec(img):
     s = hsv[:, :, 1].astype(int)
     v = hsv[:, :, 2].astype(int)
     teal_mask = _hue_in(h, 90, 125) & (s > 60) & (v > 100)
-    if _band_score(_mask_bands(teal_mask)) > 0:
+    teal_bands = _mask_bands(teal_mask)
+    teal_score, teal_ok = _sheet_structure(teal_bands, img.shape[0])
+    # Strict teal wins only if it yields a valid 3-card structure.
+    # If only 2 bands found (or structure invalid), try relaxed thresholds
+    # to catch faded 3rd headers.
+    if teal_ok and (len(teal_bands) == 3 or teal_score >= 100):
         return (90, 125, 60, 100, 0.20)
+    # Try relaxed teal thresholds for faded 3rd headers (or 2-card sheets)
+    for s_min, v_min in [(45, 80), (30, 50), (15, 30)]:
+        relaxed_mask = _hue_in(h, 90, 125) & (s > s_min) & (v > v_min)
+        relaxed_bands = _mask_bands(relaxed_mask, 0.20)
+        score, ok = _sheet_structure(relaxed_bands, img.shape[0])
+        # For relaxed thresholds, accept 2 or 3 bands as valid structures
+        # (2 bands = 2-card sheet, 3 bands = 3-card sheet)
+        # _sheet_structure returns ok=False for 2 bands, so we check manually
+        n_bands = len(relaxed_bands)
+        if (ok and n_bands >= 1) or (not ok and n_bands in (2, 3)):
+            return (90, 125, s_min, v_min, 0.20)
+    # Fall through to other color families
     candidates = []
     for idx, ((hl, hh), s_min, v_min, rowfrac) in enumerate(_BAND_FAMILIES[1:]):
         bands = _mask_bands(_hue_in(h, hl, hh) & (s > s_min) & (v > v_min),

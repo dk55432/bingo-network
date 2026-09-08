@@ -34,9 +34,11 @@ import logging
 import os
 import shutil
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
+import cv2
 import numpy as np
 from fastapi import APIRouter, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
@@ -173,10 +175,11 @@ async def scan_card(file: UploadFile, corners: Optional[str] = Form(None)):
 
     # Reader selection: READER=cnn uses the whole-cell CNN reader on the
     # full photo (EXIF-correct + teal-band geometry + column-constrained
-    # decode).  READER=tesseract (default) keeps the old contour/corner ->
-    # Hough grid -> Tesseract path.  The CNN path ignores `corners`: it
-    # auto-detects full-sheet cards rather than a single warped card.
-    if os.environ.get("READER", "tesseract") == "cnn":
+    # decode).  READER=homography uses SIFT+homography header detection
+    # with per-card column projection.  READER=tesseract (default) keeps
+    # the old contour/corner -> Hough grid -> Tesseract path.
+    reader = os.environ.get("READER", "tesseract")
+    if reader == "cnn":
         cr = _cnn_module()
         result = cr.read_sheet_bytes(_cnn_model(), file_bytes)
         if result.get("error"):
@@ -185,6 +188,25 @@ async def scan_card(file: UploadFile, corners: Optional[str] = Form(None)):
                 detail={"error": result["error"], "debug": result.get("debug", {})})
         return {"cards": result["cards"], "scan_id": result.get("scan_id"),
             "debug": result.get("debug", {})}
+    elif reader == "homography":
+        # Import homography pipeline lazily (in 01_CNN_refactor/)
+        sys.path.insert(0, str(Path(__file__).parent / "01_CNN_refactor"))
+        from pipeline_homography import read_sheet_homography
+        from cnn_reader import load_model
+        img = cv2.imdecode(np.frombuffer(file_bytes, np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            raise HTTPException(status_code=400, detail="Could not decode image")
+        results, ts = read_sheet_homography(img)
+        # Convert to same format as CNN reader
+        cards = []
+        for res in results:
+            cards.append({
+                "grid": res["grid"],
+                "needs_review": False  # TODO: add confidence check
+            })
+        dump_in = f"/tmp/cnn_reader_debug/in_{ts}.png"
+        dump_overlay = f"/tmp/cnn_reader_debug/overlay_{ts}.png"
+        return {"cards": cards, "scan_id": str(ts), "debug": {"dump_in": dump_in, "dump_overlay": dump_overlay, "ts": str(ts), "partial_sheet": len(results) < 3, "warped": False}}
 
     try:
         img = load_image(file_bytes)

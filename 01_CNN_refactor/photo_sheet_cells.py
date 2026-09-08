@@ -292,38 +292,26 @@ def _sheet_to_cells_with_boxes(
         rb = [top + (bottom - top) * k // 5 for k in range(6)]
         rb = _snap(rb, grid_sig, top, bottom, radius=40)
 
-        # ---- COLUMNS: pipeline Hough + pitch-fitted lattice (like rows) ----
+        # ---- COLUMNS: equal division with tight snapping to detected peaks ----
+        # Use equal division as the strong prior. Only snap to detected peaks
+        # if they are very close to the expected positions. This avoids the
+        # sequential-snapping error propagation when dividers are missing.
         card_crop = img[top:bottom, x0:x1]
         _, vert_xs = find_grid_line_positions(card_crop)
-        # Fit pitch from detected vertical peaks using linear regression
-        # (same strategy as rows: fit pitch, then generate uniform boundaries)
-        vert_rel = vert_xs
         width = x1 - x0
-        interior_peaks = [p for p in vert_rel if 0.05 * width < p < 0.95 * width]
-        if len(interior_peaks) >= 2:
-            expected = np.array([width * k / 5 for k in range(1, 5)], dtype=float)
-            peaks_arr = np.array(interior_peaks, dtype=float)
-            idx = np.argmin(np.abs(peaks_arr[:, None] - expected[None, :]), axis=1)
-            matched = {}
-            for p, div_idx in zip(peaks_arr, idx):
-                if div_idx not in matched or abs(p - expected[div_idx]) < abs(matched[div_idx] - expected[div_idx]):
-                    matched[div_idx] = p
-            if len(matched) >= 2:
-                xs = np.array(list(matched.keys()), dtype=float)
-                ys = np.array(list(matched.values()), dtype=float)
-                a, b = np.polyfit(xs, ys, 1)
-                pitch = max(0.12 * width, min(0.28 * width, a))
-                cb_rel = [0]
-                for k in range(1, 5):
-                    guess = k * pitch
-                    tol = pitch * 0.35
-                    candidates = [p for p in vert_rel if abs(p - guess) <= tol]
-                    cb_rel.append(min(candidates, key=lambda p: abs(p - guess)) if candidates else round(guess))
-                cb_rel.append(width)
-            else:
-                cb_rel = [round(width * k / 5) for k in range(6)]
-        else:
-            cb_rel = [round(width * k / 5) for k in range(6)]
+        
+        # Start with perfect equal division
+        cb_rel = [round(width * k / 5) for k in range(6)]
+        
+        # Only snap to a detected peak if it's very close to the expected position
+        # (tight tolerance: 12% of cell width, ~17px for typical 144px pitch)
+        tol = max(10, int(0.12 * width / 5))
+        for k in range(1, 5):
+            expected = round(width * k / 5)
+            # Search in both ALL detected peaks (including edges)
+            candidates = [p for p in vert_xs if abs(p - expected) <= tol]
+            if candidates:
+                cb_rel[k] = min(candidates, key=lambda p: abs(p - expected))
         cb = [x0 + x for x in cb_rel]
 
         # ---- ROWS: dip + snap, then enforce uniform lattice on snapped boundaries ----
@@ -368,41 +356,26 @@ def _frame_bright_extent(gray, header_boxes=None):
     """Sheet's bright-paper column extent over the frame, used to
     seed the column bounds when no header color is detectable.
 
-    If header_boxes are provided, examines the grid regions below
-    each header (where the actual bingo grids are) to find the true
-    paper extent. Uses the INTERSECTION of header box extents (not
-    union) so a single wide header box doesn't pull in the desk."""
+    If header_boxes are provided, uses their union to define the search range,
+    then analyzes the middle third of the image within that range."""
     h = gray.shape[0]
     
     if header_boxes is not None and len(header_boxes) > 0:
-        # Intersection of header box extents: max of left edges, min of right edges
-        header_x0 = max(b[0] for b in header_boxes)
-        header_x1 = min(b[2] for b in header_boxes)
+        header_x0 = min(b[0] for b in header_boxes)
+        header_x1 = max(b[2] for b in header_boxes)
         
-        # Use grid regions below each header box within the intersection
-        grid_bands = []
-        for i, (hx0, hy0, hx1, hy1) in enumerate(header_boxes):
-            top = hy1 + 2
-            bottom = header_boxes[i + 1][1] if i + 1 < len(header_boxes) else h
-            if bottom - top > 30:
-                # Clamp grid band to header intersection
-                gx0, gx1 = header_x0, header_x1
-                grid_bands.append((top, bottom, gx0, gx1))
-        
-        if grid_bands:
-            # Combine all grid regions
-            combined_band = np.vstack([gray[top:bottom, gx0:gx1] for top, bottom, gx0, gx1 in grid_bands])
-            colmean = combined_band.mean(axis=0).astype(np.uint8)
-            
-            thr, _ = cv2.threshold(colmean, 0, 255,
-                                   cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            bright = colmean > max(40, int(thr) * 0.90)
-            xs = np.where(bright)[0]
-            if xs.size > 0:
-                # Return in full-image coordinates
-                return header_x0 + xs[0], header_x0 + xs[-1]
+        # Analyze the middle third of the image within the union range
+        y0, y1 = h // 3, 2 * h // 3
+        band = gray[y0:y1, header_x0:header_x1]
+        colmean = band.mean(axis=0).astype(np.uint8)
+        thr, _ = cv2.threshold(colmean, 0, 255,
+                               cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        bright = colmean > max(40, int(thr) * 0.90)
+        xs = np.where(bright)[0]
+        if xs.size > 0:
+            return header_x0 + xs[0], header_x0 + xs[-1]
     
-    # Fallback: middle third (original behavior)
+    # Fallback: middle third of full image
     y0, y1 = h // 3, 2 * h // 3
     band = gray[y0:y1, :]
     colmean = band.mean(axis=0).astype(np.uint8)
