@@ -255,6 +255,195 @@ def _find_grid_lines_phone(card_img, verbose=False):
     return horiz_ys, vert_xs
 
 
+def _fix_row_lattice(rb, dip, top, bottom):
+    """Rebuild a uniform 6-boundary row lattice from the snapped interior
+    dividers, tolerating missing and mis-snapped dividers:
+      - a gap near 2*pitch with a dip peak at the midpoint means the divider
+        was skipped: fill it in (confirmed by the dip);
+      - dividers that don't fit the resulting pitch are outliers: drop them.
+    The top/bottom borders are extrapolated from the interior pitch, so a
+    guessy region bottom (e.g. the image edge under the last card) can't
+    stretch the rows."""
+    if len(rb) != 6:
+        return rb
+    divs = sorted(rb[1:5])
+    pitch = float(np.median(np.diff(np.array(divs, float)))) if len(divs) >= 2 else 0.0
+
+    # 1) fill missing dividers (gap ≈ 2*pitch) confirmed by the dip
+    kept = []
+    for j in range(len(divs) - 1):
+        g = divs[j + 1] - divs[j]
+        kept.append(divs[j])
+        if pitch > 0 and 1.8 * pitch <= g <= 2.35 * pitch:
+            mid = divs[j] + int(round(pitch))
+            a, b = max(top + 2, mid - 8), min(bottom - 2, mid + 8)
+            a, b = int(a), int(b)
+            if b > a:
+                kept.append(a + int(np.argmax(dip[a:b + 1])))
+
+    # 2) drop dividers that don't fit the pitch (iterate on worst fit)
+    while len(kept) >= 4:
+        arr = np.array(kept, float)
+        gaps = np.diff(arr)
+        p = float(np.median(gaps))
+        if np.max(np.abs(gaps - p)) <= 0.12 * p:
+            break
+        impact = []
+        for j in range(len(kept)):
+            gg = list(gaps)
+            if 0 < j < len(kept) - 1:
+                gg[j - 1] = arr[j + 1] - arr[j - 1]
+                gg.pop(j)
+            else:
+                gg.pop(j)
+            gg = np.array(gg, float)
+            pj = float(np.median(gg)) if gg.size else p
+            impact.append(float(np.max(np.abs(gg - pj))) if gg.size else 0.0)
+        j = int(np.argmin(impact))
+        kept.pop(j)
+
+    if len(kept) >= 3:
+        arr = np.array(kept, float)
+        p = float(np.median(np.diff(arr)))
+        p = max(70.0, min(120.0, p))
+        base = kept[0] - p
+        rb = []
+        for k in range(6):
+            v = base + k * p
+            interior = 0 < k < 5
+            far = abs(v - top) > p and abs(v - bottom) > p
+            if interior or far:
+                a, b = max(top + 2, int(v) - 6), min(bottom - 2, int(v) + 6)
+                if b > a:
+                    v = float(a + int(np.argmax(dip[a:b + 1])))
+            rb.append(int(round(v)))
+        return rb
+
+    # fallback: old uniform lattice through all 6 boundaries
+    idx = np.array([0, 1, 2, 3, 4, 5], float)
+    a, b = np.polyfit(idx, np.array(rb, float), 1)
+    pitch = max(70.0, min(120.0, a))
+    return [int(round(b + pitch * k)) for k in range(6)]
+
+
+_header_templates_cache = None
+
+
+def _get_header_templates():
+    """Lazy-load the BINGO header templates for column homography."""
+    global _header_templates_cache
+    if _header_templates_cache is None:
+        try:
+            from bingo_header_locator import load_template_features
+        except ImportError:
+            _header_templates_cache = []
+            return _header_templates_cache
+        tdir = Path(__file__).parent / "header_templates"
+        if not tdir.exists():
+            _header_templates_cache = []
+            return _header_templates_cache
+        paths = [str(p) for p in sorted(tdir.iterdir()) if p.is_file()]
+        detector = cv2.SIFT_create()
+        _header_templates_cache = load_template_features(detector, paths)
+    return _header_templates_cache
+
+
+def _header_homography_columns(gray, boxes, grid_x0, grid_x1):
+    """Per-card 6-boundary column lattice from the header-template SIFT
+    homography.
+
+    The BINGO header letters print strongly even on sheets whose number-grid
+    ink is washed out, so SIFT features on them recover a robust homography.
+    A card is matched on its OWN tight header band (full-sheet matching
+    fragments the keypoints across every card and starves the weaker cards),
+    each match is validated against sane geometry, and any card that can't be
+    matched (e.g. a dark/decorative header variant with no template) inherits
+    the nearest validated card's columns shifted by its header-box x0 offset
+    -- the sheet's printed columns run through all cards, so that offset
+    reconstructs them to within a few px, far better than equal division over
+    a bright-extent whose right edge sits on a desk.  Returns a list (one
+    entry per header box) of [x0, B|I, I|N, N|G, G|O, x5] or None when no
+    card on the sheet could be validated (caller keeps equal division)."""
+    if not boxes:
+        return []
+    try:
+        import bingo_header_locator as hdr
+    except ImportError:
+        return [None] * len(boxes)
+    templates = _get_header_templates()
+    if not templates:
+        return [None] * len(boxes)
+
+    detector = cv2.SIFT_create()
+    matcher = cv2.BFMatcher()
+    centers = [(y0 + y1) / 2 for (_, y0, _, y1) in boxes]
+    x0s = [x0 for (x0, _, _, _) in boxes]
+    out = [None] * len(boxes)
+
+    # Match each card against its own header band so keypoints aren't shared
+    # out with the other cards' matches.  Every template is tried on the full,
+    # unconsumed band (detect_all_instances' keypoint-consumption loop lets a
+    # high-inlier DEGENERATE match -- a collapsed homography with pitch ~ 0 --
+    # starve the correct full-grid match, so we score all candidates instead
+    # and keep only geometrically sane ones).
+    cands_all = [[] for _ in boxes]
+    for i, (bx0, by0, bx1, by1) in enumerate(boxes):
+        mx = max(12, int(0.05 * (bx1 - bx0)))
+        my = max(12, int(0.05 * (by1 - by0)))
+        wl = max(0, bx0 - mx)
+        wt = max(0, by0 - my)
+        band = gray[wt:by1 + my, wl:bx1 + mx]
+        if band.shape[0] < 20 or band.shape[1] < 20:
+            continue
+        skp, sdes = detector.detectAndCompute(band, None)
+        if sdes is None or len(skp) < 10:
+            continue
+        active = np.ones(len(skp), dtype=bool)
+        for templ in templates:
+            res = hdr.find_best_instance(matcher, templ, skp, sdes, active)
+            if res is None:
+                continue
+            proj = hdr.project_boundaries({"H": res["H"], "template": templ})
+            band_y = proj["B|I"]["top"][1] + wt
+            holes = [float(proj[k]["bottom"][0]) + wl
+                     for k in ("B|I", "I|N", "N|G", "G|O")]
+            pitch = float(np.median(np.diff(np.array(holes, float))))
+            if not (85.0 < pitch < 115.0):
+                continue
+            if abs(band_y - centers[i]) > 150:
+                continue
+            if not (holes[0] > grid_x0 and holes[-1] < grid_x1):
+                continue
+            cands_all[i].append((res["num_inliers"], pitch, holes))
+
+    # Sheet-level pitch consensus: the same printed grid joins every card, so
+    # all cards share one pitch.  Reject outliers vs the median before use.
+    all_pitch = [p for c in cands_all for (_, p, _) in c]
+    med_pitch = float(np.median(all_pitch)) if all_pitch else 0.0
+    for i, cands in enumerate(cands_all):
+        keep = [(n, p, h) for (n, p, h) in cands
+                if med_pitch == 0.0 or abs(p - med_pitch) <= 0.12 * med_pitch]
+        if not keep:
+            continue
+        n, p, holes = max(keep, key=lambda t: t[0])
+        out[i] = ([max(0, int(round(holes[0] - p)))]
+                  + [int(round(x)) for x in holes]
+                  + [int(round(holes[-1] + p))])
+
+    # Cards the projection couldn't reach (dark/foreign header, occluded,
+    # extreme skew): inherit the nearest validated card's columns, shifted by
+    # that card's header-box x0 offset (the printed columns pass through all
+    # cards of the sheet).  pitch and spacing are preserved.
+    matched = [k for k, c in enumerate(out) if c is not None]
+    if matched:
+        for i, cols in enumerate(out):
+            if cols is not None:
+                continue
+            src = min(matched, key=lambda s: abs(centers[i] - centers[s]))
+            out[i] = [x + (x0s[i] - x0s[src]) for x in out[src]]
+    return out
+
+
 def _sheet_to_cells_with_boxes(
         img, boxes, verbose=False, return_geometry=False):
     """Shared per-card cell extraction.  Rows use the proven brightness-dip
@@ -272,8 +461,23 @@ def _sheet_to_cells_with_boxes(
         grid_x0, grid_x1 = frame_ext
     else:
         grid_x0, grid_x1 = 0, W
-    
+
+    # Column fallback: per-card header-template homography.  The BINGO
+    # header letters print strongly even on sheets whose number-grid ink is
+    # faint, so a confident SIFT match there yields perspective-accurate
+    # column boundaries.  Equal division over the shared bright extent is
+    # fragile when the paper/desk runs past the printed grid's right border:
+    # it inflates the pitch and drifts columns off the grid (over-wide cells,
+    # off-page right edge).  When SIFT matches a card we trust the projected
+    # columns; otherwise cards keep the proven equal-division + dip path.
+    hom_cols = None
+    try:
+        hom_cols = _header_homography_columns(gray, boxes, grid_x0, grid_x1)
+    except Exception:
+        hom_cols = None
+
     cells_out = []
+    prev_pitch = None
     for i, (hx0, y0, hx1, y1) in enumerate(boxes):
         top = y1 + 2
         bottom = boxes[i + 1][1] if i + 1 < len(boxes) else H
@@ -289,7 +493,15 @@ def _sheet_to_cells_with_boxes(
 
 # ---- ROWS: proven dip + snap ----
         grid_sig = _grid_dip(gray, x0, x1, top, bottom)
-        rb = [top + (bottom - top) * k // 5 for k in range(6)]
+        # For the last card the region bottom (paper edge) can be well below
+        # the printed card bottom, inflating the equal-division pitch and
+        # seeding the snap mid-stroke even when the grid lines are faint.
+        # Seed rows from the previous card's solved pitch instead, which is a
+        # stable prior (perspective drift card-to-card is a few px).
+        if i + 1 == len(boxes) and prev_pitch is not None:
+            rb = [top + round(prev_pitch * k) for k in range(6)]
+        else:
+            rb = [top + (bottom - top) * k // 5 for k in range(6)]
         rb = _snap(rb, grid_sig, top, bottom, radius=40)
 
         # ---- COLUMNS: equal division with tight snapping to detected peaks ----
@@ -299,31 +511,92 @@ def _sheet_to_cells_with_boxes(
         card_crop = img[top:bottom, x0:x1]
         _, vert_xs = find_grid_line_positions(card_crop)
         width = x1 - x0
-        
-        # Start with perfect equal division
+
         cb_rel = [round(width * k / 5) for k in range(6)]
-        
-        # Only snap to a detected peak if it's very close to the expected position
-        # (tight tolerance: 12% of cell width, ~17px for typical 144px pitch)
         tol = max(10, int(0.12 * width / 5))
         for k in range(1, 5):
             expected = round(width * k / 5)
-            # Search in both ALL detected peaks (including edges)
             candidates = [p for p in vert_xs if abs(p - expected) <= tol]
             if candidates:
                 cb_rel[k] = min(candidates, key=lambda p: abs(p - expected))
         cb = [x0 + x for x in cb_rel]
 
+        # ---- COLUMN PITCH: correct per-card pitch from the vertical dip ----
+        # The shared extent (x0..x1) over-estimates pitch when the sheet is
+        # slightly rotated, slicing the left edge of column 5.  Snap each
+        # interior boundary to the STRONGEST vertical-grid dip in a window,
+        # rebuild the uniform lattice from that interior pitch (borders
+        # extrapolated), and keep the result only if it actually sits ON the
+        # dip lines better than the equal-division hough-snap — so sheets
+        # whose pitch or noise don't fit this correction keep the proven
+        # hough-based columns.
+        dv = _grid_dip_v(gray, max(0, x0 - 90),
+                         min(gray.shape[1] - 1, x1 + 90), top, bottom)
+        # The equal-division/hough columns assume a perfectly uniform lattice
+        # over the shared extent.  When the sheet is slightly rotated the true
+        # per-card pitch differs, so the interior dividers become uneven.
+        # Rebuild a per-card lattice from the STRONGEST vertical dips, but only
+        # trust it when its dividers coincide with LONG vertical Hough lines
+        # (printed grid dividers) at least as well as the equal division does.
+        # Short digit strokes yield strong dips but no long-line support, so
+        # they can't hijack the lattice on sheets whose grid is uniform.
+        eq = [x0 + round(width * k / 5) for k in range(6)]
+        r = int(0.22 * width / 5)
+        snapped = list(eq)
+        for k in range(1, 5):
+            a, b = max(0, snapped[k] - r), min(gray.shape[1] - 1, snapped[k] + r)
+            if b > a:
+                snapped[k] = a + int(np.argmax(dv[a:b + 1]))
+        cand = _fix_row_lattice(np.array(snapped, float), dv, 0,
+                                gray.shape[1] - 1)
+
+        def _hough_agree(lattice):
+            """Count of interior dividers that coincide with a LONG vertical
+            Hough line (the printed grid dividers; short digit strokes won't
+            accumulate enough votes to appear)."""
+            n = 0
+            for k in range(1, 5):
+                if any(abs(lattice[k] - (x0 + h)) <= 3 for h in vert_xs):
+                    n += 1
+            return n
+
+        if (_hough_agree(cand) >= 2 and _hough_agree(cand) >= _hough_agree(cb) and
+                min(cand) >= x0 - 25 and max(cand) <= x1 + 25 and
+                sum(dv[cand[k]] for k in range(1, 5)) >
+                sum(dv[cb[k]] for k in range(1, 5))):
+            cb = cand
+
+        # Homography is used ONLY when it disagrees with the equal-division+dip
+        # columns just computed -- i.e. when the printed grid is faint and the
+        # dip/Hough lattice floats off it (B 121->97, C 142->101, S2 124->97).
+        # When the two pitches agree, equal division already recovered the true
+        # lattice and the header match would merely re-draw the same grid
+        # shifted a few px, so we keep the proven equal-division columns
+        # (approved sheets stay byte-stable).
+        use_hom = False
+        if hom_cols is not None and hom_cols[i] is not None:
+            h_gaps = np.diff(np.array(hom_cols[i][1:5], float))
+            h_pitch = float(np.median(h_gaps)) if h_gaps.size else 0.0
+            cb_gaps = np.diff(np.array(cb[1:5], float))
+            cb_pitch = float(np.median(cb_gaps)) if cb_gaps.size else 0.0
+            use_hom = (cb_pitch > 0.0 and abs(h_pitch - cb_pitch) >
+                       0.10 * cb_pitch)
+        if use_hom:
+            # Card's header matched a template: the BINGO letters anchor a
+            # perspective-accurate homography, so its projected columns beat
+            # the faint-grid equal division (which floats off the printed
+            # grid / bright desk).
+            cb = hom_cols[i]
+
         # ---- ROWS: dip + snap, then enforce uniform lattice on snapped boundaries ----
         # (snap already done above for rb)
-        # Fit uniform lattice to the 4 snapped interior boundaries to correct
-        # any single-boundary mis-snap (e.g. merged rows)
+        # Rebuild the lattice from the interior dividers only, so the region
+        # bounds (esp. the last card's bottom = image edge) can't stretch the
+        # rows and a single mis-snapped divider can't skew the pitch.
         if len(rb) == 6:
-            idx = np.array([0, 1, 2, 3, 4, 5], float)
-            a, b = np.polyfit(idx, np.array(rb, float), 1)
-            pitch_r = a
-            pitch_r = max(70, min(120, pitch_r))
-            rb = [int(round(b + a * k)) for k in range(6)]
+            rb = _fix_row_lattice(rb, grid_sig, top, bottom)
+            gap_ar = np.diff(rb[1:5])
+            prev_pitch = float(np.median(gap_ar)) if gap_ar.size else None
 
         if verbose:
             print(f"card{i + 1}: band ({x0},{y0})-({x1},{y1}) "
@@ -352,12 +625,63 @@ def sheet_to_cells_teal(img, verbose=False, return_geometry=False):
         img, teal_card_bboxes(img), verbose, return_geometry)
 
 
+def _grid_detect_hough_extent(gray, header_boxes):
+    """Per-card Hough outer-border detection, used to recover the PRINTED
+    grid extent when brightness-based paper detection is ambiguous (e.g. a
+    bright desk right of the sheet makes the bright-paper column run extend
+    onto the desktop).
+
+    Runs find_grid_line_positions with edge_exclude_frac=0 so the card's own
+    outer border lines are eligible (they're normally dropped as 'edge').
+    A card counts as confident when at least 3 vertical lines are found and
+    the LEFTMOST detected line sits near the card's header-left (within 15%
+    of the header width) — a real grid border, unlike a desk/shadow line.
+    Returns (median_left, max_right) across confident cards, or None."""
+    from pipeline import find_grid_line_positions
+
+    H, W = gray.shape[:2]
+    # Crop to the central 76% of the FRAME width: wide enough to contain
+    # the printed grid (even when a header box is clipped), but narrow
+    # enough to exclude the desk/shadow lines near the photo's edge that
+    # mimick full-height vertical lines.
+    cx0, cx1 = int(0.12 * W), int(0.88 * W)
+
+    left_borders, right_borders = [], []
+    for i, (bx0, by0, bx1, by1) in enumerate(header_boxes):
+        top = by1 + 2
+        bottom = header_boxes[i + 1][1] if i + 1 < len(header_boxes) else H
+        if bottom - top < 60:
+            continue
+        crop = cv2.cvtColor(gray[top:bottom, cx0:cx1], cv2.COLOR_GRAY2BGR)
+        _, vx = find_grid_line_positions(crop, edge_exclude_frac=0)
+        full = [v + cx0 for v in vx]
+        if len(full) < 3:
+            continue
+        lo = full[0]
+        tol = 0.15 * (bx1 - bx0)
+        if abs(lo - bx0) <= tol:
+            # A real grid border, unlike a desk/shadow line: the detected
+            # vertical line nearest the card's header edge.
+            left_borders.append(lo)
+            best = min(full, key=lambda x: abs(x - bx1))
+            if abs(best - bx1) <= 0.30 * (bx1 - bx0):
+                right_borders.append(best)
+    if not left_borders and not right_borders:
+        return None
+    med_left = int(np.median(left_borders)) if left_borders else None
+    max_right = max(right_borders) if right_borders else None
+    return med_left, max_right
+
+
 def _frame_bright_extent(gray, header_boxes=None):
     """Sheet's bright-paper column extent over the frame, used to
     seed the column bounds when no header color is detectable.
 
     If header_boxes are provided, uses their union to define the search range,
-    then analyzes the middle third of the image within that range."""
+    then analyzes the middle third of the image within that range.  The
+    left edge comes from that brightness analysis; the right edge is capped
+    by the Hough-detected printed grid border when one is found, so a bright
+    desk right of the sheet can't extend the columns off the paper."""
     h = gray.shape[0]
     
     if header_boxes is not None and len(header_boxes) > 0:
@@ -373,7 +697,22 @@ def _frame_bright_extent(gray, header_boxes=None):
         bright = colmean > max(40, int(thr) * 0.90)
         xs = np.where(bright)[0]
         if xs.size > 0:
-            return header_x0 + xs[0], header_x0 + xs[-1]
+            x0 = header_x0 + int(xs[0])
+            x1 = header_x0 + int(xs[-1])
+            grid = _grid_detect_hough_extent(gray, header_boxes)
+            if grid is not None:
+                grid_left, grid_right = grid
+                if grid_right is not None and grid_right < x1:
+                    x1 = min(x1, grid_right)
+                if grid_left is not None:
+                    lefts = [b[0] for b in header_boxes]
+                    # The bright left is suspect when it sits at/before the
+                    # narrowest header: a bleedy header pulls the bright run
+                    # off the printed grid.  In that case pull the left edge
+                    # back to the Hough-detected printed border.
+                    if x0 <= min(lefts) + 6 and (max(lefts) - min(lefts)) >= 12:
+                        x0 = max(x0, grid_left)
+            return x0, x1
     
     # Fallback: middle third of full image
     y0, y1 = h // 3, 2 * h // 3
