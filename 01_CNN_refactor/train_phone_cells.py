@@ -99,7 +99,7 @@ def build():
                 print(f"== RESUME skip {path.name} (done)")
                 continue
             t0 = time.time()
-            split = next((k for k, nums in SPLITS.items() if s in nums), None)
+            split = next((k for k, nums in SPLITS.items() if s in nums), "valid")
             cells = sheet_to_cells_teal(normalize(load_photo(path)))
             by_card = {}
             for cid, r, c, cell in cells:

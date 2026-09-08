@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
+import argparse
 import re
 import shutil
+import sys
+from datetime import datetime
 from pathlib import Path
 
 WORDS = {
@@ -13,6 +16,10 @@ WORDS = {
 COL_RANGES = [(1, 15), (16, 30), (31, 45), (46, 60), (61, 75)]
 COL_SIZES = [5, 5, 4, 5, 5]
 
+IMG_LINE = re.compile(r"^(?:\S+/)?\S+\.(?:png|jpe?g)\s*:$", re.I)
+CARD_LINE = re.compile(r"[Cc]ard[s]?\s*([1-3]|one|two|three)\s*:")
+
+
 def tok_int(tok):
     t = tok.strip().strip(",").strip()
     if t.upper() == "FREE":
@@ -24,21 +31,42 @@ def tok_int(tok):
         return v
     raise ValueError(f"unrecognized token {t!r}")
 
+
 def parse_sheet(sheet_lines):
     cards = {}
     cur = None
     for ln in sheet_lines:
         ln = ln.strip()
-        if not ln or ln.startswith("#") and ln.startswith("# -"):
+        if not ln or ln.startswith("#"):
             continue
-        m = re.match(r"[Cc]ards?\s*(one|two|three)\s*:", ln)
+        m = CARD_LINE.match(ln)
         if m:
-            cur = {"one": 1, "two": 2, "three": 3}[m.group(1)]
+            raw = m.group(1)
+            cur = (int(raw) if raw.isdigit()
+                   else {"one": 1, "two": 2, "three": 3}[raw])
             cards[cur] = []
             continue
         if cur is not None:
             cards[cur] += [tok_int(x) for x in ln.split(",")]
     return cards
+
+
+def parse_dictation(lines):
+    blocks = []
+    cur_img = None
+    cur_lines = []
+    for ln in lines:
+        if IMG_LINE.match(ln.strip()):
+            if cur_img:
+                blocks.append((cur_img, cur_lines))
+            cur_img = ln.strip().rstrip(":")
+            cur_lines = []
+        else:
+            cur_lines.append(ln)
+    if cur_img:
+        blocks.append((cur_img, cur_lines))
+    return blocks
+
 
 def column_major_to_grid(items):
     assert len(items) == 24, f"expected 24 non-free cells, got {len(items)}"
@@ -63,64 +91,109 @@ def column_major_to_grid(items):
             assert lo <= v <= hi, f"col {c} value {v} outside {lo}-{hi}"
     return grid
 
+
 def png_to_jpeg(src, dst):
     import cv2
     im = cv2.imread(str(src))
     assert im is not None, f"could not read {src}"
     assert cv2.imwrite(str(dst), im, [cv2.IMWRITE_JPEG_QUALITY, 95]), dst
-    print(f"wrote {dst.name} ({dst.stat().st_size//1024}KB)")
+    print(f"wrote {dst.name} ({dst.stat().st_size // 1024}KB)")
 
-ROOT = Path("/Users/davidkohn/Downloads/bingo-network")
-SRC = ROOT / "01_CNN_refactor" / "manually_dictated_cards.txt"
-GT = ROOT / "scan_card_numbers.txt"
-PHONE = ROOT / "01_CNN_refactor" / "phone_sheets"
-DUPS = {"in_1788419678.png", "in_1788456962.png"}
 
-text = SRC.read_text().splitlines()
-blocks = []
-per_sheet = {}
-cur_sheet = []
-sheet_imgs = []
-for ln in text:
-    if re.match(r"in_\d+\.png\s*:$", ln.strip()):
-        if cur_sheet:
-            per_sheet[sheet_imgs[-1]] = cur_sheet
-            cur_sheet = []
-        sheet_imgs.append(ln.strip().rstrip(":"))
-    else:
-        cur_sheet.append(ln)
-if cur_sheet:
-    per_sheet[sheet_imgs[-1]] = cur_sheet
-assert set(per_sheet) == {"in_1788419637.png", "in_1788436281.png"}, per_sheet.keys()
+def next_sheet_number(gt, phone):
+    txt = gt.read_text() if gt.exists() else ""
+    nums = [int(m) for m in re.findall(r"#blue_sheet_(\d+):", txt)]
+    nums += [int(m.group(1)) for p in phone.glob("*.jpeg")
+             if (m := re.match(r"blue_sheet_(\d+)", p.name))]
+    return (max(nums) + 1) if nums else 1
 
-sheet_id = 31
-for img, lines in per_sheet.items():
-    cards = parse_sheet(lines)
-    assert set(cards) == {1, 2, 3}, cards.keys()
-    jpeg = PHONE / f"blue_sheet_{sheet_id:03d}.jpeg"
-    png_to_jpeg(ROOT / "01_CNN_refactor" / img, jpeg)
-    blk = [f"#blue_sheet_{sheet_id:03d}:"]
-    for cid in (1, 2, 3):
-        grid = column_major_to_grid(cards[cid])
-        blk.append(f"#card{cid}")
-        for row in grid:
-            blk.append("[" + ", ".join(str(v) for v in row) + "]")
-        blk.append("")
-    blocks.append("\n".join(blk).rstrip() + "\n")
-    print(f"\n== {img} -> {jpeg.name} ==\n" + "\n".join(blk))
-    sheet_id += 1
 
-shutil.copy2(GT, ROOT / "scan_card_numbers.txt.bak_dict2026-09-08")
-with GT.open("a") as f:
-    f.write("\n" + "\n".join(blocks))
-print("\nappended to", GT.name)
+def main(argv):
+    ap = argparse.ArgumentParser(description="Dictated bingo sheet -> "
+                                             "phone_sheets jpeg + truth block")
+    ap.add_argument("--src", default="manually_dictated_cards.txt")
+    ap.add_argument("--gt", default="scan_card_numbers.txt")
+    ap.add_argument("--phone", default="phone_sheets")
+    ap.add_argument("--start", type=int, default=None,
+                    help="first sheet number (default: next free number)")
+    ap.add_argument("--no-delete", action="store_true",
+                    help="keep source image files after conversion")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="parse and report only; write nothing")
+    args = ap.parse_args(argv)
 
-for d in DUPS:
-    p = ROOT / "01_CNN_refactor" / d
-    p.unlink(missing_ok=True)
-    print("deleted duplicate", d)
+    base = Path(__file__).resolve().parent.parent
+    src = Path(args.src)
+    if not src.is_absolute():
+        src = base / "01_CNN_refactor" / src
+    gt = Path(args.gt)
+    if not gt.is_absolute():
+        gt = base / gt
+    phone = Path(args.phone)
+    if not phone.is_absolute():
+        phone = base / "01_CNN_refactor" / phone
+    phone.mkdir(parents=True, exist_ok=True)
 
-for img in per_sheet:
-    p = ROOT / "01_CNN_refactor" / img
-    p.unlink(missing_ok=True)
-    print("removed source", img)
+    lines = src.read_text().splitlines()
+    blocks = parse_dictation(lines)
+    if not blocks:
+        sys.exit(f"no image headers found in {src}")
+
+    start = args.start if args.start is not None else next_sheet_number(gt, phone)
+    if start < 25:
+        print(f"WARNING: sheets {start} and up start in train split "
+              "(1-24); use --start 25 to keep them held-out", file=sys.stderr)
+
+    gt_text = gt.read_text() if gt.exists() else ""
+    sheet_id = start
+    out_blocks = []
+    for img, sheet_lines in blocks:
+        cards = parse_sheet(sheet_lines)
+        if not cards:
+            sys.exit(f"{img}: no cards parsed")
+        for cid in cards:
+            assert len(cards[cid]) == 24, (
+                f"{img} card{cid}: got {len(cards[cid])} numbers, want 24")
+        while re.search(rf"#blue_sheet_{sheet_id:03d}:", gt_text):
+            sheet_id += 1
+        jpeg = phone / f"blue_sheet_{sheet_id:03d}.jpeg"
+        if jpeg.exists():
+            sys.exit(f"{jpeg.name} already exists; use --start to skip past it")
+        ipath = Path(img)
+        if not ipath.is_absolute():
+            ipath = src.parent / img
+        if not args.dry_run:
+            png_to_jpeg(ipath, jpeg)
+        blk = [f"#blue_sheet_{sheet_id:03d}:"]
+        for cid in sorted(cards):
+            grid = column_major_to_grid(cards[cid])
+            blk.append(f"#card{cid}")
+            for row in grid:
+                blk.append("[" + ", ".join(str(v) for v in row) + "]")
+            blk.append("")
+        out = "\n".join(blk).rstrip() + "\n"
+        out_blocks.append(out)
+        print(f"\n== {img} -> {jpeg.name} ==\n{out}")
+        sheet_id += 1
+
+    if args.dry_run:
+        print(f"\ndry-run: {len(out_blocks)} sheet(s), starting at {start}")
+        return
+
+    bak = gt.with_name(f"{gt.stem}.bak_dict{datetime.now():%Y-%m-%d_%H%M%S}")
+    shutil.copy2(gt, bak)
+    with gt.open("a") as f:
+        f.write("\n" + "\n".join(out_blocks))
+    print("\nappended to", gt.name, f"(backup {bak.name})")
+
+    if not args.no_delete:
+        for img, _ in blocks:
+            ipath = Path(img)
+            if not ipath.is_absolute():
+                ipath = src.parent / img
+            ipath.unlink(missing_ok=True)
+            print("removed source", ipath)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
