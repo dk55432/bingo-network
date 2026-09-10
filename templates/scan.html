@@ -41,6 +41,23 @@
 
   .subtitle { color: var(--muted); font-size: 14px; margin: 0 0 28px; }
 
+  .scan-menu-bar { text-align: right; margin: -22px 0 8px; }
+  .scan-menu-bar a { color: var(--muted); font-size: 13px; text-decoration: none; }
+  .scan-menu-bar a:active { color: var(--stamp-blue); }
+
+  .blur-warning {
+    background: #fbeceb;
+    border: 1.5px solid var(--stamp-red);
+    color: var(--stamp-red);
+    border-radius: 10px;
+    padding: 11px 13px;
+    font-size: 13.5px;
+    line-height: 1.4;
+    margin: 0 0 14px;
+  }
+
+  .cancel-review { border-color: var(--muted); color: var(--muted); }
+
   .upload-box {
     border: 1.5px dashed var(--line);
     border-radius: 12px;
@@ -301,6 +318,7 @@
 <main>
   <h1>Scan a bingo card</h1>
   <p class="subtitle" id="subtitle">Take a photo, then fix any flagged numbers before saving.</p>
+  <div class="scan-menu-bar"><a id="exitMenuLink" href="/player">‹ Exit to game menu</a></div>
 
   <div id="noPlayer" class="no-player" style="display:none;">
     Missing game_id/player_id in the URL — open this page via the "Scan cards from phone" button on the player page.
@@ -309,7 +327,7 @@
   <label class="upload-box" id="uploadBox">
     <input type="file" id="fileInput" accept="image/*" capture="environment">
     <div class="upload-label">Tap to take or choose a photo</div>
-    <div class="upload-hint">You'll adjust the corners next — cropping tight is fine</div>
+    <div class="upload-hint">The sheet is detected automatically — hold steady, keep it flat and well-lit.</div>
   </label>
 
   <div class="manual-entry">
@@ -325,6 +343,8 @@
   </div>
 
   <div class="status" id="status"></div>
+
+  <div class="blur-warning" id="blurWarning" style="display:none;"></div>
 
   <div id="cornerPicker" style="display:none;">
     <div class="corner-picker-wrap" id="cornerWrap">
@@ -355,6 +375,7 @@
       <button class="scan-another" id="assistBtn" style="display:none;">Misaligned or wrong cards? Tap the 3 card tops instead</button>
     </details>
     <button class="confirm" id="confirmBtn" disabled>Save card</button>
+    <button class="scan-another cancel-review" id="cancelReviewBtn">Cancel — discard this scan</button>
     <div class="saved-note" id="savedNote"></div>
   </div>
 
@@ -496,20 +517,49 @@
       .catch(() => {});
   }
 
-  fileInput.addEventListener("change", () => {
+  fileInput.addEventListener("change", async () => {
     const file = fileInput.files[0];
     if (!file) return;
     selectedFile = file;
 
-    previewImg.src = URL.createObjectURL(file);
-    corners = defaultCorners();
-
     uploadBox.style.display = "none";
     cardEl.style.display = "none";
-    statusEl.textContent = "";
-    cornerPicker.style.display = "block";
-    initCornerOverlay();
+    statusEl.textContent = "Scanning…";
+    hideBlurWarning();
+
+    const formData = new FormData();
+    formData.append("file", selectedFile);
+
+    try {
+      const res = await fetch(`${API_BASE}/scan-card`, { method: "POST", body: formData });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        if (err.detail?.debug) console.warn("scan debug:", err.detail.debug);
+        scanError = err.detail || null;
+        throw new Error(err.detail?.error || err.detail || "Scan failed");
+      }
+      handleScanSuccess(await res.json());
+    } catch (e) {
+      const dbg = scanError?.debug;
+      if (dbg?.ts) {
+        statusEl.textContent = `Error: ${e.message} — tap the 3 card tops to scan it manually:`;
+        openAssist(dbg.ts);
+      } else {
+        statusEl.textContent = `Error: ${e.message}`;
+        uploadBox.style.display = "block";
+      }
+    }
   });
+
+  function showBlurWarning(message) {
+    const el = document.getElementById("blurWarning");
+    el.style.display = "block";
+    el.textContent = message;
+  }
+
+  function hideBlurWarning() {
+    document.getElementById("blurWarning").style.display = "none";
+  }
 
   retakeBtn.addEventListener("click", () => {
     cornerPicker.style.display = "none";
@@ -561,6 +611,10 @@
 
   function handleScanSuccess(data) {
     lastScanId = data.scan_id ?? null;
+    hideBlurWarning();
+    if (data.debug?.blurry) {
+      showBlurWarning("This photo is blurry — some numbers may be misread. Retake for a more reliable read, or carefully check every number below before saving.");
+    }
     const alignImg = document.getElementById("alignImg");
     if (lastScanId) alignImg.src = `${API_BASE}/scan-debug/${lastScanId}.png`;
     alignImg.style.display = lastScanId ? "block" : "none";
@@ -853,6 +907,7 @@
   function resetForNextScan() {
     lastScanId = null;
     scanError = null;
+    hideBlurWarning();
     const a = document.getElementById("alignImg");
     a.style.display = "none";
     a.src = "";
@@ -866,6 +921,27 @@
   }
 
   scanAnotherBtn.addEventListener("click", () => fileInput.click());
+
+  const cancelReviewBtn = document.getElementById("cancelReviewBtn");
+  cancelReviewBtn.addEventListener("click", () => {
+    lastScanId = null;
+    scanError = null;
+    hideBlurWarning();
+    cardsContainer.innerHTML = "";
+    cardEl.style.display = "none";
+    const a = document.getElementById("alignImg");
+    a.style.display = "none";
+    a.src = "";
+    assistPanel.style.display = "none";
+    assistBtn.style.display = "none";
+    fileInput.value = "";
+    selectedFile = null;
+    savedNote.textContent = "";
+    statusEl.textContent = "";
+    window.scrollTo(0, 0);
+    uploadBox.style.display = "block";
+    document.getElementById("manualEntryInput").focus();
+  });
 </script>
 </body>
 </html>

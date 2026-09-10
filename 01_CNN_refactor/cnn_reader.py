@@ -32,6 +32,11 @@ import photo_sheet_cells
 COLUMN_RANGES = [(1, 15), (16, 30), (31, 45), (46, 60), (61, 75)]
 FREE = (2, 2)
 _SCAN_WIDTH = 1257
+# Sheet-level Laplacian variance below this means the photo is out of
+# focus (worst training sheet scores 117; every sharp sheet is >= 700), so
+# the constrained decode reads mushy cells and commits wrong numbers.  Flag
+# those reads for review instead of trusting them.
+BLUR_REVIEW_THRESHOLD = 500.0
 
 # ImageFolder sorted classes lexicographically ("1","10","11",...), so the
 # model's output index does NOT equal the number.  Map between them.
@@ -47,6 +52,11 @@ cell_transform = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize((0.5,), (0.5,)),
 ])
+
+
+def _sheet_blur(gray):
+    """Out-of-focus score: Laplacian variance of the normalized sheet."""
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
 def _teal_hue_stats(bgr):
@@ -390,6 +400,8 @@ def _read_sheet(model, sheet_bgr, forced_bands=None, pre_boxes=None):
     misread can be diagnosed after the fact.
     """
     sheet_bgr, warped = _warp_sheet(sheet_bgr)
+    blur = _sheet_blur(cv2.cvtColor(sheet_bgr, cv2.COLOR_BGR2GRAY))
+    blurry = blur < BLUR_REVIEW_THRESHOLD
     if forced_bands:
         by_card, bboxes = cells_from_forced(sheet_bgr, forced_bands)
     elif pre_boxes is not None:
@@ -465,6 +477,8 @@ def _read_sheet(model, sheet_bgr, forced_bands=None, pre_boxes=None):
             lgrid[(r, c)] = cell_logits(model, cell)
         numbers, confs = decode_card(lgrid)
         result = card_result(numbers, confs)
+        if blurry:
+            result["needs_review"] = True
         mean_conf = np.mean([confs[r][c] for r in range(5) for c in range(5)
                              if (r, c) != FREE])
         min_conf = min(confs[r][c] for r in range(5) for c in range(5)
@@ -481,7 +495,9 @@ def _read_sheet(model, sheet_bgr, forced_bands=None, pre_boxes=None):
         "dump_overlay": str(dbg / f"overlay_{ts}.png"),
         "ts": str(ts),
         "partial_sheet": len(by_card) < 3,
-        "warped": bool(warped)}}
+        "warped": bool(warped),
+        "blur": round(blur, 1),
+        "blurry": blurry}}
 
 
 PENDING_DIR = Path("/tmp/phone_learning_pending")
