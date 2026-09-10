@@ -39,7 +39,7 @@ PHONE = Path(__file__).parent / "phone_sheets"
 PHONE3 = Path(__file__).parent / "phone_sheets3"
 DST = Path("/tmp/phone_cells_v2")
 FREE = (2, 2)
-SPLITS = {"train": range(1, 25), "valid": range(25, 33)}
+SPLITS = {"train": range(1, 66), "valid": range(66, 83)}
 # (source dir, sheet->include pairs to skip, prefix for filenames)
 BATCHES = [(PHONE, {}, "A"), (PHONE3, {1}, "B")]
 
