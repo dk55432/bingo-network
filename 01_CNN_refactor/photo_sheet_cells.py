@@ -490,6 +490,80 @@ def _header_homography_columns(gray, boxes, grid_x0, grid_x1):
     return out
 
 
+def _sheet_strong_clusters(boxes, gray):
+    """Cross-card vertical line clusters with support >= 2.  Every printed
+    column divider spans all cards of the sheet, so only grid lines (or
+    full-height desk/paper artifacts) get multi-card support; digit strokes
+    are bounded per cell and scatter."""
+    cand = []
+    H = gray.shape[0]
+    for i, b in enumerate(boxes):
+        top = b[1] + 2
+        bottom = boxes[i + 1][1] if i + 1 < len(boxes) else H
+        if bottom - top < 60:
+            continue
+        _, vx = find_grid_line_positions(
+            cv2.cvtColor(gray[top:bottom, :], cv2.COLOR_GRAY2BGR))
+        cand.extend(vx)
+    cand = np.sort(np.array(cand, float))
+    runs = []
+    for x in cand:
+        if runs and abs(x - runs[-1][-1]) <= 10.0:
+            runs[-1].append(x)
+        else:
+            runs.append([x])
+    return [(float(np.mean(c)), len(c)) for c in runs if len(c) >= 2]
+
+
+def _best_column_lattice(strong, min_header_x0):
+    """Rebuild the sheet's uniform 6-column lattice from strong cross-card
+    vertical-line clusters.
+
+    Equal division over the bright-paper extent assumes the extent's edges
+    ARE the printed grid's outer borders.  When shadows/folds move one of
+    those edges, every column drifts and cells slice digits.  The printed
+    grid lines themselves are the robust reference: they run through every
+    card, and the card's header left edge (the sheet's printed left border)
+    anchors the phase.  Pitch comes from the high-support cluster gaps;
+    phase is chosen so a boundary sits nearest the header left edge."""
+    if len(strong) < 2:
+        return None
+    xs = np.sort(np.array([float(x) for x, _ in strong]))
+    gaps = np.diff(xs)
+    ok = gaps[(gaps >= 85.0) & (gaps <= 125.0)]
+    if ok.size == 0:
+        return None
+    p = int(round(float(np.median(ok))))
+    best = None
+    for x in xs:
+        x0s = [x - k * p for k in range(-2, 3)
+               if min_header_x0 - 45 <= x - k * p <= min_header_x0 + 45]
+        if not x0s:
+            continue
+        x0 = min(x0s, key=lambda v: abs(v - min_header_x0))
+        if abs(x0 - min_header_x0) > 20:
+            continue
+        slots = np.round((xs - x0) / p)
+        dist = np.abs(xs - (x0 + p * slots))
+        okk = (dist <= 5.0) & (slots >= 0) & (slots <= 5)
+        n_in = int(okk.sum())
+        n_slots = len({int(s) for s, d in zip(slots, dist) if d <= 5.0 and 0 <= s <= 5})
+        if (best is None or n_in > best[0]
+                or (n_in == best[0] and n_slots > best[2])
+                or (n_in == best[0] and n_slots == best[2]
+                    and abs(x0 - min_header_x0) < best[3])):
+            best = (n_in, x0, n_slots, abs(x0 - min_header_x0))
+    if best is None or best[0] < 2:
+        return None
+    # Trust the lattice only when it actually explains MOST of the
+    # strong clusters.  Spurious cross-card lines (digit-column shading,
+    # desk artifacts) scatter; a real printed grid puts every strong
+    # line on slots of one uniform lattice.
+    if best[0] < max(2, int(np.ceil(0.8 * len(xs)))):
+        return None
+    return int(round(best[1])), p
+
+
 def _sheet_to_cells_with_boxes(
         img, boxes, verbose=False, return_geometry=False):
     """Shared per-card cell extraction.  Rows use the proven brightness-dip
@@ -521,6 +595,20 @@ def _sheet_to_cells_with_boxes(
         hom_cols = _header_homography_columns(gray, boxes, grid_x0, grid_x1)
     except Exception:
         hom_cols = None
+
+    # Printed-grid reference: cross-card vertical line clusters.  Every
+    # printed column divider spans all cards, so clusters supported by >=2
+    # cards locate the true grid even when the bright-paper extent's edges
+    # float off it (shadowed/folded sheet side).
+    strong = []
+    lattice = None
+    try:
+        strong = _sheet_strong_clusters(boxes, gray)
+        if len(strong) >= 2:
+            lo_b = min(b[0] for b in boxes)
+            lattice = _best_column_lattice(strong, lo_b)
+    except Exception:
+        strong = []
 
     cells_out = []
     prev_pitch = None
@@ -566,6 +654,8 @@ def _sheet_to_cells_with_boxes(
             if candidates:
                 cb_rel[k] = min(candidates, key=lambda p: abs(p - expected))
         cb = [x0 + x for x in cb_rel]
+        cb_eq = list(cb)
+        vx_abs = [x0 + h for h in vert_xs]
 
         # ---- COLUMN PITCH: correct per-card pitch from the vertical dip ----
         # The shared extent (x0..x1) over-estimates pitch when the sheet is
@@ -633,6 +723,37 @@ def _sheet_to_cells_with_boxes(
             # the faint-grid equal division (which floats off the printed
             # grid / bright desk).
             cb = hom_cols[i]
+
+        # ---- COLUMN REWIRE: if the column lattice drifted off the printed
+        # grid (equal division over a bad bright extent), pin ALL cards to
+        # the sheet's strong cross-card lattice.  Fires only when the
+        # dip/Hough and homography paths both declined (cb is still the raw
+        # equal division), the equal-division columns barely align with the
+        # printed dividers (<3 of 4), and the cross-card lattice is also
+        # confirmed by the card's OWN vertical lines.  Cards already on the
+        # grid keep their proven columns, so approved sheets stay
+        # byte-stable.  The lattice itself is only computed when a super-
+        # majority of strong clusters sit on one uniform grid anchored to
+        # the sheet's left border (see _best_column_lattice).
+        if lattice is not None:
+            aligned = sum(1 for k in range(1, 5)
+                          if cb[k] is not None
+                          and any(abs(cb[k] - x) <= 12 for x, _ in strong))
+            # Only rewire a card whose columns are STILL the raw equal
+            # division (the dip/Hough and homography paths both declined it)
+            # and that is clearly off the printed grid but the shared lattice
+            # is confirmed by the card's OWN vertical lines.
+            if (cb == cb_eq and aligned < 3):
+                lx0, lp = lattice
+                lx = [lx0 + lp * k for k in range(6)]
+                if 0 <= lx[0] and lx[-1] < gray.shape[1]:
+                    own = sum(1 for k in range(1, 5)
+                              if any(abs(lx[k] - h) <= 6 for h in vx_abs))
+                    if own >= 2:
+                        cb = list(lx)
+                        if verbose:
+                            print(f"card{i + 1}: columns rewired to sheet "
+                                  f"lattice {cb}")
 
         # ---- ROWS: dip + snap, then enforce uniform lattice on snapped boundaries ----
         # (snap already done above for rb)
