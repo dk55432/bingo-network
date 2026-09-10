@@ -609,6 +609,11 @@ def _sheet_to_cells_with_boxes(
             lattice = _best_column_lattice(strong, lo_b)
     except Exception:
         strong = []
+    # Cards of one printed sheet share the same horizontal layout; when the
+    # teal header strips are x-aligned the grid positions are identical on
+    # every card, so the sheet lattice evidence extends to all of them.
+    sheet_aligned = all(abs(b[0] - min(b[0] for b in boxes)) <= 15
+                        for b in boxes)
 
     cells_out = []
     prev_pitch = None
@@ -730,7 +735,9 @@ def _sheet_to_cells_with_boxes(
         # dip/Hough and homography paths both declined (cb is still the raw
         # equal division), the equal-division columns barely align with the
         # printed dividers (<3 of 4), and the cross-card lattice is also
-        # confirmed by the card's OWN vertical lines.  Cards already on the
+        # confirmed by the card's OWN vertical lines (on sheets whose cards
+        # are header-aligned, one confirming line suffices -- the printed
+        # grid is identical across the stacked cards).  Cards already on the
         # grid keep their proven columns, so approved sheets stay
         # byte-stable.  The lattice itself is only computed when a super-
         # majority of strong clusters sit on one uniform grid anchored to
@@ -749,7 +756,7 @@ def _sheet_to_cells_with_boxes(
                 if 0 <= lx[0] and lx[-1] < gray.shape[1]:
                     own = sum(1 for k in range(1, 5)
                               if any(abs(lx[k] - h) <= 6 for h in vx_abs))
-                    if own >= 2:
+                    if own >= 2 or (sheet_aligned and own >= 1):
                         cb = list(lx)
                         if verbose:
                             print(f"card{i + 1}: columns rewired to sheet "
