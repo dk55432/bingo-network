@@ -1,0 +1,14 @@
+# CNN reader (READER=cnn) dependencies.
+#
+# torch/torchvision are pulled from PyTorch's CPU-only wheel index so the
+# install works on CPU-only machines (Mac + Orange Pi) and -crucially - does
+# NOT drag in the CUDA (nvidia-*) packages that PyPI's default torch build
+# now depends on.
+#
+# The +cpu local-version pins force pip to take the CPU build from the extra
+# index.  Install the whole stack on a fresh box with:
+#   pip install -r requirements.txt -r requirements-cnn.txt
+
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.14.0+cpu
+torchvision==0.29.0+cpu
