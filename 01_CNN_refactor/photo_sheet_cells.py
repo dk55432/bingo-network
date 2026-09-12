@@ -479,14 +479,22 @@ def _header_homography_columns(gray, boxes, grid_x0, grid_x1):
     # Cards the projection couldn't reach (dark/foreign header, occluded,
     # extreme skew): inherit the nearest validated card's columns, shifted by
     # that card's header-box x0 offset (the printed columns pass through all
-    # cards of the sheet).  pitch and spacing are preserved.
+    # cards of the sheet).  pitch and spacing are preserved.  A stacked
+    # sheet's card headers sit only a few px apart, so a large offset means
+    # the header box is garbage (e.g. a washed-out forced scan) — inherit
+    # unshifted rather than shifting the whole grid off the paper.
     matched = [k for k, c in enumerate(out) if c is not None]
     if matched:
         for i, cols in enumerate(out):
             if cols is not None:
                 continue
             src = min(matched, key=lambda s: abs(centers[i] - centers[s]))
-            out[i] = [x + (x0s[i] - x0s[src]) for x in out[src]]
+            gaps = np.diff(np.array(out[src], float))
+            pitch = float(np.median(gaps)) if gaps.size else 100.0
+            shift = x0s[i] - x0s[src]
+            if abs(shift) > 0.35 * pitch:
+                shift = 0
+            out[i] = [x + shift for x in out[src]]
     return out
 
 
@@ -565,10 +573,15 @@ def _best_column_lattice(strong, min_header_x0):
 
 
 def _sheet_to_cells_with_boxes(
-        img, boxes, verbose=False, return_geometry=False):
+        img, boxes, verbose=False, return_geometry=False, trace=None):
     """Shared per-card cell extraction.  Rows use the proven brightness-dip
     + snap (robust on normalized phone images).  Columns use pipeline Hough
-    on the full card width (from frame bright extent) + uniform lattice fit."""
+    on the full card width (from frame bright extent) + uniform lattice fit.
+
+    trace: optional dict that receives the geometry DECISIONS made here
+    (boxes, extent, clusters/lattice, per-card rows/cols and whether the
+    homography or lattice path was used) so a misread can be diagnosed
+    from the degraded /scan-card debug payload or server log."""
     if not boxes:
         return []
     H, W = img.shape[:2]
@@ -710,10 +723,13 @@ def _sheet_to_cells_with_boxes(
         # Homography is used ONLY when it disagrees with the equal-division+dip
         # columns just computed -- i.e. when the printed grid is faint and the
         # dip/Hough lattice floats off it (B 121->97, C 142->101, S2 124->97).
-        # When the two pitches agree, equal division already recovered the true
-        # lattice and the header match would merely re-draw the same grid
-        # shifted a few px, so we keep the proven equal-division columns
-        # (approved sheets stay byte-stable).
+        # A >5% pitch disagreement is enough: the orange sheet 1789240382
+        # showed a modest ~7% float (equal division 107 vs true ~100) that
+        # sliced into digits and ran off the sheet's right edge, below the
+        # old 10% bar.  When the two pitches agree, equal division already
+        # recovered the true lattice and the header match would merely
+        # re-draw the same grid shifted a few px, so we keep the proven
+        # equal-division columns (approved sheets stay byte-stable).
         use_hom = False
         if hom_cols is not None and hom_cols[i] is not None:
             h_gaps = np.diff(np.array(hom_cols[i][1:5], float))
@@ -721,7 +737,7 @@ def _sheet_to_cells_with_boxes(
             cb_gaps = np.diff(np.array(cb[1:5], float))
             cb_pitch = float(np.median(cb_gaps)) if cb_gaps.size else 0.0
             use_hom = (cb_pitch > 0.0 and abs(h_pitch - cb_pitch) >
-                       0.10 * cb_pitch)
+                       0.05 * cb_pitch)
         if use_hom:
             # Card's header matched a template: the BINGO letters anchor a
             # perspective-accurate homography, so its projected columns beat
@@ -742,6 +758,7 @@ def _sheet_to_cells_with_boxes(
         # byte-stable.  The lattice itself is only computed when a super-
         # majority of strong clusters sit on one uniform grid anchored to
         # the sheet's left border (see _best_column_lattice).
+        rewired = False
         if lattice is not None:
             aligned = sum(1 for k in range(1, 5)
                           if cb[k] is not None
@@ -758,6 +775,7 @@ def _sheet_to_cells_with_boxes(
                               if any(abs(lx[k] - h) <= 6 for h in vx_abs))
                     if own >= 2 or (sheet_aligned and own >= 1):
                         cb = list(lx)
+                        rewired = True
                         if verbose:
                             print(f"card{i + 1}: columns rewired to sheet "
                                   f"lattice {cb}")
@@ -777,6 +795,19 @@ def _sheet_to_cells_with_boxes(
                   f"card top={top} bottom={bottom} "
                   f"rows={rb} cols={cb}")
 
+        if trace is not None:
+            trace.setdefault("cards", []).append({
+                "card": i + 1,
+                "top": top,
+                "bottom": bottom,
+                "rows": [int(v) for v in rb],
+                "cb_eq": [int(v) for v in cb_eq],
+                "cb_used": [int(v) for v in cb],
+                "hom": (list(hom_cols[i]) if hom_cols is not None
+                        and hom_cols[i] is not None else None),
+                "use_hom": bool(use_hom),
+                "rewired": bool(rewired)})
+
         for r in range(5):
             for c in range(5):
                 yA, yB, xA, xB = rb[r], rb[r + 1], cb[c], cb[c + 1]
@@ -789,14 +820,25 @@ def _sheet_to_cells_with_boxes(
                     cells_out.append((i + 1, r, c, cell, (xA, yA, xB, yB)))
                 else:
                     cells_out.append((i + 1, r, c, cell))
+
+    if trace is not None:
+        trace["x0"] = int(grid_x0)
+        trace["x1"] = int(grid_x1)
+        trace["boxes"] = [[int(v) for v in b] for b in boxes]
+        trace["clusters"] = [[int(v) for v in b] for b in strong]
+        trace["lattice"] = ([round(lattice[0], 1), round(lattice[1], 1)]
+                            if lattice is not None else None)
+        trace["hom_all"] = ([list(h) if h is not None else None for h in hom_cols]
+                            if hom_cols is not None else None)
     return cells_out
 
 
-def sheet_to_cells_teal(img, verbose=False, return_geometry=False):
+def sheet_to_cells_teal(img, verbose=False, return_geometry=False,
+                        trace=None):
     """Card geometry derived from teal header bboxes (auto-detected sheet
     print color, see teal_card_bboxes).  See _sheet_to_cells_with_boxes."""
     return _sheet_to_cells_with_boxes(
-        img, teal_card_bboxes(img), verbose, return_geometry)
+        img, teal_card_bboxes(img), verbose, return_geometry, trace)
 
 
 def _grid_detect_hough_extent(gray, header_boxes):
@@ -908,7 +950,14 @@ def forced_card_bboxes(img, band_tops):
     height is a fixed fraction of the card pitch (the printed header bars
     are a consistent ~0.13 of card pitch across sheet colors); the column
     extent comes from the card's bright-paper body (see _card_x_extent),
-    independent of the washed-out header color."""
+    independent of the washed-out header color.
+
+    All three cards are one physical sheet, so they share one column
+    extent.  The per-card bright-body read (y-dependent) fragments when
+    the sheet is side-shadowed or washed out, producing wildly different
+    left edges (e.g. 516/873/933) that later shift every card's columns
+    off the printed grid; clamp each value back to the frame-level extent
+    whenever it drifts too far from it."""
     H, W = img.shape[:2]
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     tops = sorted(int(round(min(H - 2, max(2, float(t)))))
@@ -916,7 +965,11 @@ def forced_card_bboxes(img, band_tops):
     if len(tops) < 3:
         return []
     ext = _frame_bright_extent(gray)
-    cx = (ext[0] + ext[1]) / 2 if ext else W / 2
+    if ext is None:
+        return []
+    sx0, sx1 = ext
+    tol = 50
+    cx = (sx0 + sx1) / 2
     boxes = []
     for i, t in enumerate(tops):
         pitch = (tops[1] - tops[0]) if i == 0 else (tops[i] - tops[i - 1])
@@ -927,19 +980,22 @@ def forced_card_bboxes(img, band_tops):
         h = int(max(30, min(90, round(0.13 * pitch))))
         y1 = min(H - 2, t + h)
         xL, xR = _card_x_extent(gray, y1 + 2, next_t, cx)
-        if xL < 0:
-            xL, xR = ext if ext else (0, W - 1)
+        if xL < 0 or abs(xL - sx0) > tol:
+            xL = sx0
+        if xR < 0 or abs(xR - sx1) > tol:
+            xR = sx1
         boxes.append((int(xL), t, int(xR), int(y1)))
     return boxes
 
 
 def sheet_to_cells_forced(img, band_tops, verbose=False,
-                          return_geometry=False):
-    """Card geometry pinned to user-tapped band tops — the assisted-scan
+                          return_geometry=False, trace=None):
+    """Card geometry pinned to user-tapped band tops -- the assisted-scan
     path for washed-out photos (e.g. gray sheets) where no header color
     gate can find the card bands on its own."""
     return _sheet_to_cells_with_boxes(
-        img, forced_card_bboxes(img, band_tops), verbose, return_geometry)
+        img, forced_card_bboxes(img, band_tops), verbose, return_geometry,
+        trace)
 
 
 def _card_x_extent(gray, y0, y1, cx):

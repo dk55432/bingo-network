@@ -201,11 +201,11 @@ def load_photo_bytes(data):
     return cv2.cvtColor(np.array(im), cv2.COLOR_RGB2BGR)
 
 
-def cells_from(sheet_bgr):
+def cells_from(sheet_bgr, trace=None):
     """Full-sheet BGR (normalized by caller) -> {cid: {(r, c): cell}} and
     {cid: {(r, c): (xA,yA,xB,yB)}}."""
     items = photo_sheet_cells.sheet_to_cells_teal(
-        sheet_bgr, return_geometry=True)
+        sheet_bgr, return_geometry=True, trace=trace)
     by = {}
     boxes = {}
     for cid, r, c, cell, box in items:
@@ -214,11 +214,11 @@ def cells_from(sheet_bgr):
     return by, boxes
 
 
-def cells_from_forced(sheet_bgr, band_tops):
+def cells_from_forced(sheet_bgr, band_tops, trace=None):
     """Same as cells_from but pins the card layout to user-tapped band tops
     (assisted scan for washed-out sheets)."""
     items = photo_sheet_cells.sheet_to_cells_forced(
-        sheet_bgr, band_tops, return_geometry=True)
+        sheet_bgr, band_tops, return_geometry=True, trace=trace)
     by = {}
     boxes = {}
     for cid, r, c, cell, box in items:
@@ -402,20 +402,33 @@ def _read_sheet(model, sheet_bgr, forced_bands=None, pre_boxes=None):
     sheet_bgr, warped = _warp_sheet(sheet_bgr)
     blur = _sheet_blur(cv2.cvtColor(sheet_bgr, cv2.COLOR_BGR2GRAY))
     blurry = blur < BLUR_REVIEW_THRESHOLD
+    trace = {}
     if forced_bands:
-        by_card, bboxes = cells_from_forced(sheet_bgr, forced_bands)
+        by_card, bboxes = cells_from_forced(sheet_bgr, forced_bands, trace)
     elif pre_boxes is not None:
         # Use pre-detected boxes (from original image, scaled to normalized)
         from photo_sheet_cells import _sheet_to_cells_with_boxes
         items = _sheet_to_cells_with_boxes(
-            sheet_bgr, pre_boxes, return_geometry=True)
+            sheet_bgr, pre_boxes, return_geometry=True, trace=trace)
         by, boxes = {}, {}
         for cid, r, c, cell, box in items:
             by.setdefault(cid, {})[(r, c)] = cell
             boxes.setdefault(cid, {})[(r, c)] = box
         by_card, bboxes = by, boxes
     else:
-        by_card, bboxes = cells_from(sheet_bgr)
+        by_card, bboxes = cells_from(sheet_bgr, trace)
+    for c in trace.get("cards", []):
+        dbg_line = (f"[geo] card{c['card']} rows={c['rows']} "
+                    f"cols={c['cb_used']} ext={trace.get('x0')}..{trace.get('x1')}"
+                    f" hom={'Y' if c['use_hom'] else 'N'}"
+                    f" rewire={'Y' if c['rewired'] else 'N'}")
+        if c.get("cb_used") != c.get("cb_eq"):
+            dbg_line += f" (eq {c['cb_eq']})"
+        print(dbg_line, flush=True)
+    if trace and (trace.get("clusters") or trace.get("lattice")):
+        print(f"[geo] clusters={trace.get('clusters')} "
+              f"lattice={trace.get('lattice')} "
+              f"hom_all={trace.get('hom_all')}", flush=True)
     ts = int(time.time())
     dbg = Path("/tmp/cnn_reader_debug")
     dbg.mkdir(parents=True, exist_ok=True)
@@ -497,7 +510,8 @@ def _read_sheet(model, sheet_bgr, forced_bands=None, pre_boxes=None):
         "partial_sheet": len(by_card) < 3,
         "warped": bool(warped),
         "blur": round(blur, 1),
-        "blurry": blurry}}
+        "blurry": blurry,
+        "geometry": trace}}
 
 
 PENDING_DIR = Path("/tmp/phone_learning_pending")

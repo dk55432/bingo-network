@@ -59,10 +59,12 @@ async def join_page(request: Request):
     
 @app.get("/player")
 async def player_page(request: Request):
-    return templates.TemplateResponse(
+    resp = templates.TemplateResponse(
         request=request,
         name="player.html"
     )
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return resp
 
 @app.get("/create_game")
 async def create_game_page(request: Request):
@@ -80,10 +82,15 @@ async def host(request: Request):
 
 @app.get("/scan")
 async def scan_page(request: Request):
-    return templates.TemplateResponse(
+    resp = templates.TemplateResponse(
         request=request,
         name="scan.html"
     )
+    # The scan page's CSS changes often while the phone keeps a cached copy
+    # (phones cache HTML hard), which bits of stale layout (broken border
+    # "fragments") no restart seems to fix.  Never let the browser cache it.
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return resp
 
 # DAVE: I'm going to do this over the websocket instead of a REST endpoint.
 #       See "create_game" below.   

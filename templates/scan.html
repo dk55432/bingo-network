@@ -59,8 +59,9 @@
   .cancel-review { border-color: var(--muted); color: var(--muted); }
 
   .upload-box {
-    border: 1.5px dashed var(--line);
-    border-radius: 12px;
+    display: block;
+    border: 1.5px solid var(--line);
+    border-radius: 12px 12px 0 0;
     padding: 28px 20px;
     text-align: center;
     background: var(--card);
@@ -75,11 +76,12 @@
   .upload-hint { color: var(--muted); font-size: 13px; margin-top: 4px; }
 
   .manual-entry {
-    margin-top: 14px;
+    margin-top: 0;
     padding: 16px;
     background: var(--card);
     border: 1.5px solid var(--line);
-    border-radius: 12px;
+    border-top: 0;
+    border-radius: 0 0 12px 12px;
   }
 
   .manual-entry-label {
