@@ -9,6 +9,10 @@ image per cell into ../learning_cells/<number>/.  This script:
      base model's knowledge isn't destroyed),
   4. saves the updated checkpoint (previous one kept as .bak).
 
+Only cells whose filename-embedded scan timestamp is >= MIN_SCAN_TS are
+merged: cells recorded while older scanner/parsing bugs were live have
+mis-segmented crops paired with labels, and would poison the fine-tune.
+
 The ImageFolder class ordering matches how cnn_reader maps logits back
 to numbers: ImageFolder.classes is lexicographically sorted, so class
 index i corresponds to the i-th smallest label, with index 0 unused.
@@ -38,6 +42,13 @@ from train_phone_cells import (  # noqa: E402
 LEARNING = Path(__file__).parent / "learning_cells"
 BACKUP_DIR = Path(__file__).parent / "learning_backups"
 CKPT = Path(__file__).parent / "cell_classifier_phone.pth"
+# Provenance gate: only confirmed cells whose scan started at/after this
+# time are eligible.  Each cell's filename embeds its scan epoch
+# (<scan_id>_c<cid>_r<r>c<c>.jpg), so older mis-segmented cells — recorded
+# while the scan geometry / parsing fixes weren't in service yet — are never
+# merged into the train split.  2026-09-12 is the day the corrected reader
+# went live; corpus harvested before then must stay out of retraining.
+MIN_SCAN_TS = int(_dt.datetime(2026, 9, 12).timestamp())
 EPOCHS = 30
 LR = 1e-4
 BATCH = 32
@@ -72,8 +83,12 @@ def backup_learning():
 
 def merge_learning():
     """Copy confirmed cells into DST/train/<number>/.  Filenames embed the
-    scan id, so re-runs are idempotent and different scans never clash."""
+    scan id, so re-runs are idempotent and different scans never clash.
+    Cells whose embedded scan timestamp is before MIN_SCAN_TS are skipped —
+    they were recorded while older scanner/parsing bugs were live and their
+    labels are unreliable (stale-corpus poison guard)."""
     n = 0
+    skipped = 0
     for num_dir in sorted(LEARNING.iterdir()):
         if not num_dir.is_dir():
             continue
@@ -82,10 +97,18 @@ def merge_learning():
         for f in num_dir.iterdir():
             if f.suffix.lower() != ".jpg":
                 continue
+            scan_id = f.name.split("_", 1)[0]
+            if not scan_id.isdigit() or int(scan_id) < MIN_SCAN_TS:
+                skipped += 1
+                continue
             target = dst / f.name
             if not target.exists():
                 shutil.copy(f, target)
                 n += 1
+    if skipped:
+        cutoff = _dt.datetime.fromtimestamp(MIN_SCAN_TS)
+        print(f"merge_learning: excluded {skipped} cells with scan timestamp "
+              f"before {cutoff} (stale-corpus gate)")
     return n
 
 
