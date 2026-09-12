@@ -193,8 +193,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 )
                 # TODO: At some point we'll want to store mapping websocket -> player
                 
-                # TODO: eventually let users enter/scan their own cards.  For now, use test cards 1-3.
-                player.add_card(create_test_card(player, 1))
                 game.add_player(player)
 
                 await manager.send_to_player( player.websocket,
@@ -606,7 +604,6 @@ async def websocket_endpoint(websocket: WebSocket):
                         websocket=ws,
                         connected_at=datetime.now()
                     )
-                    new_player.add_card(create_test_card(new_player, 1))
                     game.add_player(new_player)
                     logger.info("setup_new_game: promoted waiting-room entry "+new_player.display_name)
                     await manager.send_to_player(
