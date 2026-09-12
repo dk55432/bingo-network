@@ -106,6 +106,12 @@ re-run `cnn_reader._read_sheet()` over the dump set and verify card counts don't
 regress (24 dumps: gray working / gray fail / gray uneven / 1-card / 2-card; pink;
 orange; green). `GET /scan-debug-in/{ts}.png` serves the tap image for the assist.
 
+This check is now automated in CI: a curated 14-dump golden corpus lives in
+`regression_dumps/` (committed) and is replayed by `test_scan_regression.py`,
+comparing card counts, partial_sheet, error presence, and exact per-cell grids
+against `regression_dumps/manifest.json`. Regenerate the golden only after an
+intentional improvement: `python test_scan_regression.py --rewrite-manifest`.
+
 ## Holdover / known limitations
 
 - Sheet-bottom clamp on bright tables (making the last card's region never extend off the sheet) is unsolved — ink-fraction alone doesn't stop at the sheet edge.
