@@ -1,11 +1,19 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 
 <head>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Bingo Host</title>
     <style>
         td.marked { background: yellow; }
+
+        /* Color-blind-safe: marked host numbers get a checkmark label and a
+           thick outline in addition to the yellow fill. */
+        .host-num.marked {
+            background-color: #ffe600;
+            outline: 3px solid #000;
+            font-weight: bold;
+        }
 
         /* .hostBoard {
             display: grid;
@@ -25,7 +33,7 @@
 
 .host-num {
     display: inline-block;
-    width: 38px;
+    min-width: 38px;
     text-align: center;
     font-size: 18px;
     cursor: pointer;
@@ -50,14 +58,24 @@
 <h1>Bingo Host</h1>
 
 <div id="currentNumber"
+     class="current-number"
+     role="status"
+     aria-live="assertive"
+     aria-atomic="true"
      style="
-       font-size: 40px;
+       font-size: 64px;
        font-weight: bold;
+       color: #000;
+       background: #fff;
+       border: 4px solid #000;
+       display: inline-block;
+       padding: 8px 16px;
+       margin: 8px 0;
      ">
     ---
 </div>
 
-Called numbers: <div id="history"> --- </div>
+Called numbers: <div id="history" aria-live="polite"> --- </div>
 
 <input id="numberInput" type="text" placeholder="Enter number">
 
@@ -67,7 +85,7 @@ Called numbers: <div id="history"> --- </div>
 
 <div id="preview"></div>
 
-<div id="gameStatus">Game Status: SETUP</div>
+<div id="gameStatus" role="status" aria-live="polite">Game Status: SETUP</div>
 
 <div>
     Winning pattern:
@@ -118,24 +136,20 @@ const GameStatus = Object.freeze({
     GAME_OVER: "GAME_OVER"
 });
 const GameStatusDisplay = Object.freeze({
-    SETUP: "🟢 Waiting for players",
-    IN_PROGRESS: "🔴 Game in progress",
-    GAME_OVER: "🏁 Game over"
+    SETUP: { emoji: "🟢", text: "Waiting for players" },
+    IN_PROGRESS: { emoji: "🔴", text: "Game in progress" },
+    GAME_OVER: { emoji: "🏁", text: "Game over" }
 });
 function gameStatusToText(status) {
-    switch (status) {
-        case GameStatus.SETUP:
-            return "🟢 Waiting for players";
+    const l = GameStatusDisplay[status];
+    if (!l) return status;
+    return `<span aria-hidden="true">${l.emoji}</span><span>${l.text}</span>`;
+}
 
-        case GameStatus.IN_PROGRESS:
-            return "🔴 Game in progress";
-
-        case GameStatus.GAME_OVER:
-            return "🏁 Game over";
-
-        default:
-            return status;
-    }
+function vibrate(pattern) {
+  if (typeof navigator !== "undefined" && navigator.vibrate) {
+    try { navigator.vibrate(pattern); } catch (e) {}
+  }
 }
 
 let pendingNumber = null;
@@ -269,6 +283,7 @@ function handleHostSocketMessage(event) {
     else if (data.type === "number_called") {
         document.getElementById("currentNumber").textContent =
             data.number;
+        vibrate(150);
         markCalledNumberHost(data.number);
     }
     else if (data.type === "new_game") {
@@ -280,7 +295,7 @@ function handleHostSocketMessage(event) {
     }
     else if (data.type === "game_status") {
         console.log("game_status: game status is now " + data.status)
-        document.getElementById("gameStatus").innerText =
+        document.getElementById("gameStatus").innerHTML =
                                 gameStatusToText(data.status);
         updatePatternSelectState(data.status, data.pattern_name);
     }
@@ -363,7 +378,18 @@ function drawHostBoardDoubles(containerId = "hostBoard") {
 function markCalledNumberHost(calledNumber) {
   const host = document.getElementById("hostBoard");
   host.querySelectorAll(`.host-num[data-bingo="${CSS.escape(calledNumber)}"]`)
-      .forEach(el => el.classList.add("marked"));
+      .forEach(el => {
+        if (el.classList.contains("marked")) return;
+        el.classList.add("marked");
+        el.setAttribute("aria-label", `${el.dataset.bingo}, called`);
+        if (!el.querySelector(".tick")) {
+          const tick = document.createElement("span");
+          tick.className = "tick";
+          tick.setAttribute("aria-hidden", "true");
+          tick.textContent = " ✓";
+          el.appendChild(tick);
+        }
+      });
 }
 
 const RANGES = { B: [1,15], I: [16,30], N: [31,45], G: [46,60], O: [61,75] };

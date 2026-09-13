@@ -88,10 +88,11 @@ tests) stays green; no live module imported any of them.
   still used), `convert_dictation.py` (dictation→ground-truth utility),
   `debug_scan.py` (CLI debug tool).
 
-## 5. Accessibility (the stated mission)
+## 5. Accessibility (the stated mission)  (DONE Sep 2026)
 Large high-contrast current-number display, vibration on new call,
 screen-reader semantics, color-blind-safe marking, "unmarked numbers
-remaining" per card.
+remaining" per card. All client-side (player view + host mirrors); details
+in NOTES.md "Accessibility" section.
 
 ## 6. Game-day observability
 A `/health` (or minimal admin view): model version + retrain date, scan

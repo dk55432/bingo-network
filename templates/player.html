@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
     <head>
         <link rel="icon" href="data:,">
         <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -9,21 +9,11 @@
             }
 
             td {
-
                 width: 50px;
                 height: 50px;
-
                 border: 1px solid black;
-
                 text-align: center;
-
                 font-size: 24px;
-            }
-
-            .marked {
-
-                background-color: yellow;
-                font-weight: bold;
             }
 
             #cards {
@@ -48,6 +38,55 @@
                 font-weight: bold;
                 background: #ddd;
             }
+
+            /* Marked cells carry three cues — yellow fill, a leading
+               checkmark, thicker border — so the state is never conveyed
+               by colour alone (color-blind safe). */
+            td.marked,
+            .bingo-card td.marked {
+                background-color: #ffe600;
+                border: 3px solid #000;
+                font-weight: bold;
+            }
+
+            /* High-contrast current-number display (pure black on white,
+               ~21:1 contrast ratio). */
+            .current-number {
+                font-size: 120px;
+                line-height: 1;
+                font-weight: 800;
+                color: #000;
+                background: #fff;
+                border: 6px solid #000;
+                padding: 12px 24px;
+                display: inline-block;
+                min-width: 3.5ch;
+                text-align: center;
+                margin: 8px 0;
+            }
+
+            h2 {
+                font-size: 1.4em;
+                margin: 12px 0 4px;
+            }
+
+            .remaining {
+                font-weight: normal;
+            }
+
+            /* Visually-hidden text targeted at screen readers only. */
+            .sr-only {
+                position: absolute;
+                width: 1px;
+                height: 1px;
+                padding: 0;
+                margin: -1px;
+                overflow: hidden;
+                clip: rect(0 0 0 0);
+                clip-path: inset(50%);
+                white-space: nowrap;
+                border: 0;
+            }
         </style> 
     </head>
 <body>
@@ -67,15 +106,16 @@
 WebSocket Status:
 <span id="status">Disconnected</span>
 </p>
-Game Status: <div id="gameStatus">Connecting...</div>
+Game Status: <div id="gameStatus" role="status" aria-live="polite">Connecting...</div>
 Winning Pattern: <span id="patternName">---</span>
-<p>Called Numbers: <span id="calledNumbers"></span></p>
+<p>Called Numbers: <span id="calledNumbers" aria-live="polite"></span></p>
 
+<h2>Current number</h2>
 <div id="currentNumber"
-     style="
-       font-size: 80px;
-       font-weight: bold;
-     ">
+     class="current-number"
+     role="status"
+     aria-live="assertive"
+     aria-atomic="true">
     ---
 </div>
 
@@ -89,24 +129,16 @@ const GameStatus = Object.freeze({
     GAME_OVER: "GAME_OVER"
 });
 const GameStatusDisplay = Object.freeze({
-    SETUP: "🟢 Waiting for players",
-    IN_PROGRESS: "🔴 Game in progress",
-    GAME_OVER: "🏁 Game over"
+    SETUP: { emoji: "🟢", text: "Waiting for players" },
+    IN_PROGRESS: { emoji: "🔴", text: "Game in progress" },
+    GAME_OVER: { emoji: "🏁", text: "Game over" }
 });
+// Decorates the status string with its emoji hidden from screen readers
+// (the emoji is decorative; the text carries the meaning).
 function gameStatusToText(status) {
-    switch (status) {
-        case GameStatus.SETUP:
-            return "🟢 Waiting for players";
-
-        case GameStatus.IN_PROGRESS:
-            return "🔴 Game in progress";
-
-        case GameStatus.GAME_OVER:
-            return "🏁 Game over";
-
-        default:
-            return status;
-    }
+    const l = GameStatusDisplay[status];
+    if (!l) return status;
+    return `<span aria-hidden="true">${l.emoji}</span><span>${l.text}</span>`;
 }
 
 let reconnectAttempts = 0;
@@ -167,15 +199,48 @@ function startHeartbeat(socket) {
     missedPings++;
     if (missedPings > MAX_MISSED) {
       console.warn("Too many missed pongs, forcing reconnect");
-      socket.close(); // triggers onclose -> reconnect
+      socket.close();
       return;
     }
     socket.send(JSON.stringify({ type: "ping" }));
-  }, 10000); // every 10s
+  }, 10000);
 }
 
 function stopHeartbeat() {
   clearInterval(heartbeatTimer);
+}
+
+// --- accessibility helpers ---
+
+function vibrate(pattern) {
+  if (typeof navigator !== "undefined" && navigator.vibrate) {
+    try { navigator.vibrate(pattern); } catch (e) {}
+  }
+}
+
+function markCell(td) {
+  if (td.classList.contains("marked")) return;
+  td.classList.add("marked");
+  const value = td.dataset.bingo || td.textContent.replace(/\s*✓\s*/g, "").trim();
+  td.setAttribute("aria-label", value + ", marked");
+  if (!td.querySelector(".tick")) {
+    const tick = document.createElement("span");
+    tick.className = "tick";
+    tick.setAttribute("aria-hidden", "true");
+    tick.textContent = " ✓";
+    td.appendChild(tick);
+  }
+}
+
+function updateRemainingCounts() {
+  document.querySelectorAll(".bingo-card").forEach(cardEl => {
+    const unmarked = cardEl.querySelectorAll("td:not(.marked)").length;
+    const label = cardEl.dataset.cardLabel || "Card";
+    const milabel = cardEl.querySelector(".remaining");
+    if (milabel) milabel.textContent = `${unmarked} to go`;
+    const cap = cardEl.querySelector("caption");
+    if (cap) cap.textContent = `${label}, ${unmarked} unmarked numbers remaining`;
+  });
 }
 
 function requestCatchUp(socket) {
@@ -205,21 +270,24 @@ function handleSocketMessage(event) {
     else if (data.type === "number_called") {
         console.log("number_called: ", data.number);
         showCurrentNumber(data.number);
+        vibrate(200);
         markCalledNumber(data.number);
+        updateRemainingCounts();
     }
     else if (data.type === "history") {
         console.log("History:", data.called_numbers);
         document.getElementById("calledNumbers").textContent= data.called_numbers;
         mark_cards(data.called_numbers);
+        updateRemainingCounts();
     }
     else if (data.type === "winner") {
         console.log("WINNER!", data.winners);
         handle_winners(data.winners);
-        // alert("BINGO!");
     } 
     else if (data.type === "cards") {
         console.log("Received cards:", data.cards);
         draw_cards(data.cards)
+        updateRemainingCounts();
     }
     else if (data.type === "left") {
         console.log("Received 'left' message, shutting down..")
@@ -234,7 +302,7 @@ function handleSocketMessage(event) {
         draw_cards( [] )
     }
     else if (data.type === "game_status") {
-        document.getElementById("gameStatus").innerText =
+        document.getElementById("gameStatus").innerHTML =
             gameStatusToText(data.status);
         if (data.pattern_name) {
             document.getElementById("patternName").textContent = data.pattern_name;
@@ -361,11 +429,14 @@ function draw_cards(cards) {
 
 function draw_card(card, container, number) {
   let html = "";
-  html += '<table class="bingo-card">';
-  html += `<tr><th colspan="5">Card ${number}</th></tr>`;
+  html += `<table class="bingo-card" data-card-label="Card ${number}">`;
+  // Screen-reader-only caption; the visual header row also shows the
+  // live "N to go" count (updated in updateRemainingCounts()).
+  html += `<caption class="sr-only">Card ${number}</caption>`;
+  html += `<tr><th scope="colgroup" colspan="5">Card ${number} <span class="remaining"></span></th></tr>`;
 
   html += "<tr>";
-  html += "<th>B</th><th>I</th><th>N</th><th>G</th><th>O</th>";
+  html += "<th scope=\"col\">B</th><th scope=\"col\">I</th><th scope=\"col\">N</th><th scope=\"col\">G</th><th scope=\"col\">O</th>";
   html += "</tr>";
 
   for (let row = 0; row < 5; row++) {
@@ -373,8 +444,10 @@ function draw_card(card, container, number) {
     for (let col = 0; col < 5; col++) {
       const value = card.grid[row][col]; // e.g. "G52"
       const isMarked = card.marked[row][col];
+      const state = isMarked ? "marked" : "not marked";
+      const tick = isMarked ? ' <span class="tick" aria-hidden="true">✓</span>' : '';
 
-      html += `<td data-bingo="${value}"${isMarked ? ' class="marked"' : ''}>${value}</td>`;
+      html += `<td data-bingo="${value}"${isMarked ? ' class="marked"' : ''} aria-label="${value}, ${state}">${value}${tick}</td>`;
     }
     html += "</tr>";
   }
@@ -389,7 +462,7 @@ function mark_cards(called_numbers) {
   for (const num of called_numbers) {
     container
       .querySelectorAll(`td[data-bingo="${CSS.escape(num)}"]`)
-      .forEach(td => td.classList.add("marked"));
+      .forEach(markCell);
   }
 }
 
@@ -399,7 +472,7 @@ function markCalledNumber(calledNumber) {
 
   container
     .querySelectorAll(`td[data-bingo="${CSS.escape(calledNumber)}"]`)
-    .forEach(td => td.classList.add("marked"));
+    .forEach(markCell);
 }
 
 function handle_winners(winners) {
@@ -421,11 +494,14 @@ function handle_winners(winners) {
     document.getElementById("currentNumber").innerText = str;
    
     if (myWins.length > 0) {
+        vibrate([200, 100, 200]); // distinct pattern: YOU won
         str = "BINGO! You won on these cards:\n";
         for (const myWin of myWins) {
             str += "Card " + myWin.card_id + "\n";
         }
         alert(str);
+    } else {
+        vibrate(100);
     }
 }
 
