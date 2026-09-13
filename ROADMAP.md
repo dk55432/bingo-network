@@ -49,7 +49,7 @@ Full setup/ops/troubleshooting notes live in NOTES.md ("Tailscale Funnel…").
   for the CNN reader (8.5% baseline there) — not a usable e2e set. The
   strong e2e data (`phone_sheets/`) is gitignored/100+MB.
 
-## 3. Retrain loop automation + eval gate
+## 3. Retrain loop automation + eval gate  (DONE Sep 2026)
 **Ship gate + corpus audit DONE Sep 2026.**
 
 - **Ship gate** (`01_CNN_refactor/eval_gate.py`): a candidate `.pth` is
@@ -70,9 +70,23 @@ Full setup/ops/troubleshooting notes live in NOTES.md ("Tailscale Funnel…").
   via normal hall scanning, then run `train_learning.py` on the Mac.
 
 ## 4. Legacy cleanup
-`parse_bingo_sheet.py` (2518 lines), `pipeline.py`, `00_card_scan_refactor/`,
-`defunct_tests/`, `recognize_cards.py`, tesseract-era eval scripts are dead
-weight vs the CNN reader. Removes confusion, 23 TODO/FIXMEs.
+**DONE Sep 2026** — removed dead weight vs the CNN reader (~2.7k files,
+12MB): `00_card_scan_refactor/` (tesseract-era digit dataset + scripts),
+`defunct_tests/` (k6/ws harnesses on a feature that was abandoned — k6
+never delivered messages), and the old-eraser scripts that nothing live
+imported (`parse_bingo_sheet.py`, `recognize_cards.py`,
+`build_{labeled_glyphs,phone_digits,scan_digits}.py`,
+`train_{phone,scan}_digits.py`, `evaluate_phone.py`, `compare_readers.py`,
+`evaluate_photo_alignment.py`, `test_installation.py`). Full suite (76
+tests) stays green; no live module imported any of them.
+- Kept on purpose despite the old list: **`pipeline.py`** (still the
+  default `READER` path *and* `photo_sheet_cells` imports `_cell_boundaries,
+  find_grid_line_positions` from it) and **`pipeline_homography.py`**
+  (lazily imported by `bingo_scan`). TODO/FIXME count is now 5
+  (all in live code; the old "23" figure was stale).
+- Left in place: `simulate_game.mjs` + `ws` (Node WS load-test harness,
+  still used), `convert_dictation.py` (dictation→ground-truth utility),
+  `debug_scan.py` (CLI debug tool).
 
 ## 5. Accessibility (the stated mission)
 Large high-contrast current-number display, vibration on new call,
