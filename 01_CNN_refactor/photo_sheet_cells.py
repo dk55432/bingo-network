@@ -1,3 +1,4 @@
+import sys
 """Phone-photo sheet -> cells, using the server pipeline's Hough geometry.
 
 The scan-tuned sheet_to_cells assumes flatbed-bright paper (fixed <190
@@ -799,8 +800,55 @@ def _sheet_to_cells_with_boxes(
             # Card's header matched a template: the BINGO letters anchor a
             # perspective-accurate homography, so its projected columns beat
             # the faint-grid equal division (which floats off the printed
-            # grid / bright desk).
-            cb = hom_cols[i]
+            # grid / bright desk).  But on some sheets (e.g. yellow) the
+            # template match projects the grid out of phase with the actual
+            # printed separators, causing the overlay to slice digits.
+            # When the fallback (cb) is a corrected lattice (cb != eq), trust
+            # it: only adopt hom if its margin-ink is not worse.
+            # When the fallback is the raw equal division (cb == eq), the
+            # fallback is unreliable -- check if hom has high margin-ink
+            # (>8000, indicating slicing), and if so correct hom phase by
+            # searching small shifts (+/-30px) to minimize margin-ink.
+            hc = hom_cols[i]
+
+            def _margin_ink(cols, rows):
+                total = 0
+                for r in range(len(rows) - 1):
+                    y0, y1 = rows[r], rows[r + 1]
+                    for c in range(1, 5):
+                        x = cols[c]
+                        if x - 7 >= 0:
+                            total += int((gray[y0:y1, x - 7:x] < 180).sum())
+                        if x + 7 <= gray.shape[1]:
+                            total += int((gray[y0:y1, x:x + 7] < 180).sum())
+                return total
+
+            if cb != eq:
+                # Fallback is a corrected lattice -- gate on margin-ink
+                ink_hc = _margin_ink(hc, rb)
+                ink_cb = _margin_ink(cb, rb)
+                if ink_hc <= ink_cb:
+                    cb = hc
+            else:
+                # Fallback is raw equal division -- unreliable.
+                # Only phase-correct hom if it has high margin-ink (>8000)
+                # and a shift reduces it by >25%.
+                ink_hc = _margin_ink(hc, rb)
+                print(f'DBG card{i} ink_hc={ink_hc}')
+                if ink_hc > 8000:
+                    best_ink = ink_hc
+                    best_shift = 0
+                    for shift in range(-30, 31, 2):
+                        shifted = [hc[0]] + [x + shift for x in hc[1:5]] + [hc[5]]
+                        if min(shifted) < 0 or max(shifted) >= gray.shape[1]:
+                            continue
+                        ink = _margin_ink(shifted, rb)
+                        if ink < best_ink:
+                            best_ink, best_shift = ink, shift
+                    if best_shift != 0 and best_ink < ink_hc * 0.75:
+                        hc = [hc[0]] + [x + best_shift for x in hc[1:5]] + [hc[5]]
+                sys.stdout.flush()
+                cb = hc
 
         # ---- COLUMN REWIRE: if the column lattice drifted off the printed
         # grid (equal division over a bad bright extent), pin ALL cards to
