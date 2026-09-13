@@ -630,6 +630,7 @@ def _sheet_to_cells_with_boxes(
 
     cells_out = []
     prev_pitch = None
+    prev_pitch2 = None
     for i, (hx0, y0, hx1, y1) in enumerate(boxes):
         top = y1 + 2
         bottom = boxes[i + 1][1] if i + 1 < len(boxes) else H
@@ -650,8 +651,22 @@ def _sheet_to_cells_with_boxes(
         # seeding the snap mid-stroke even when the grid lines are faint.
         # Seed rows from the previous card's solved pitch instead, which is a
         # stable prior (perspective drift card-to-card is a few px).
-        if i + 1 == len(boxes) and prev_pitch is not None:
-            rb = [top + round(prev_pitch * k) for k in range(6)]
+        if i + 1 == len(boxes):
+            if prev_pitch is not None and prev_pitch2 is not None:
+                # Perspective: each lower card is closer to the camera, so its
+                # printed grid is *larger* in image space (blue sheet scan
+                # 1789266911: card pitches 70 -> 77 -> ~89).  Copying the
+                # previous card's pitch shortchanges the last card — rows get
+                # compressed and sliced into the row above, and the last row is
+                # dropped entirely.  Extrapolate the growth trend instead:
+                # near-frontal photos have pitch ~ proportional card-over-card.
+                seed_pitch = prev_pitch * prev_pitch / max(1.0, prev_pitch2)
+                seed_pitch = max(50.0, min(140.0, seed_pitch))
+                rb = [top + round(seed_pitch * k) for k in range(6)]
+            elif prev_pitch is not None:
+                rb = [top + round(prev_pitch * k) for k in range(6)]
+            else:
+                rb = [top + (bottom - top) * k // 5 for k in range(6)]
         else:
             rb = [top + (bottom - top) * k // 5 for k in range(6)]
         rb = _snap(rb, grid_sig, top, bottom, radius=40)
@@ -788,6 +803,7 @@ def _sheet_to_cells_with_boxes(
         if len(rb) == 6:
             rb = _fix_row_lattice(rb, grid_sig, top, bottom)
             gap_ar = np.diff(rb[1:5])
+            prev_pitch2 = prev_pitch
             prev_pitch = float(np.median(gap_ar)) if gap_ar.size else None
 
         if verbose:

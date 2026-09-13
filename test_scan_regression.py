@@ -114,7 +114,8 @@ if __name__ == "__main__":
         import time
         model = cnn_reader.load_model()
         manifest = {}
-        for ts, png, _ in CASES:
+        for png in sorted(DUMP_DIR.glob("in_*.png")):
+            ts = png.stem.split("_")[1]
             sheet = cv2.imread(str(png))
             payload = cnn_reader._read_sheet(model, sheet)
             err = payload.get("error")
@@ -128,6 +129,6 @@ if __name__ == "__main__":
             }
             time.sleep(0.05)
         MANIFEST.write_text(json.dumps(manifest, indent=1))
-        print(f"rewrote {MANIFEST}")
+        print(f"rewrote {MANIFEST} ({len(manifest)} entries)")
     else:
         sys.exit(pytest.main([__file__, "-v"]))
