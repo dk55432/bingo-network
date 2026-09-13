@@ -800,16 +800,24 @@ def _sheet_to_cells_with_boxes(
             # Card's header matched a template: the BINGO letters anchor a
             # perspective-accurate homography, so its projected columns beat
             # the faint-grid equal division (which floats off the printed
-            # grid / bright desk).  But on some sheets (e.g. yellow) the
-            # template match projects the grid out of phase with the actual
-            # printed separators, causing the overlay to slice digits.
-            # When the fallback (cb) is a corrected lattice (cb != eq), trust
-            # it: only adopt hom if its margin-ink is not worse.
-            # When the fallback is the raw equal division (cb == eq), the
-            # fallback is unreliable -- check if hom has high margin-ink
-            # (>8000, indicating slicing), and if so correct hom phase by
-            # searching small shifts (+/-30px) to minimize margin-ink.
+            # grid / bright desk).  But on some sheets the template match
+            # projects a grid that is the wrong scale (e.g. pink sheet
+            # 1789340606 card1 where hom spans only 56% of the fallback
+            # lattice width).  Reject hom if its column span is too small
+            # relative to the fallback lattice, unless the fallback itself
+            # has an unreasonable pitch (in which case hom may be the only
+            # usable signal, as with yellow sheets).
             hc = hom_cols[i]
+
+            # Span check: compare hom span to FALLBACK lattice span (cb
+            # before hom adoption).  A correct homography projects the
+            # full template grid; a mismatched one often projects only a
+            # subset.
+            fallback_span = cb[-1] - cb[0]
+            hom_span = hc[-1] - hc[0]
+            if hom_span < 0.7 * fallback_span:
+                use_hom = False
+                # Fall through to keep cb
 
             def _margin_ink(cols, rows):
                 total = 0
@@ -823,20 +831,19 @@ def _sheet_to_cells_with_boxes(
                             total += int((gray[y0:y1, x:x + 7] < 180).sum())
                 return total
 
-            if cb != eq:
-                # Fallback is a corrected lattice -- gate on margin-ink
-                ink_hc = _margin_ink(hc, rb)
-                ink_cb = _margin_ink(cb, rb)
-                if ink_hc <= ink_cb:
-                    cb = hc
-            else:
-                # Fallback is raw equal division -- unreliable.
-                # Only phase-correct hom if it has high margin-ink (>8000)
-                # and a shift reduces it by >25%.
-                ink_hc = _margin_ink(hc, rb)
-                print(f'DBG card{i} ink_hc={ink_hc}')
-                if ink_hc > 8000:
-                    best_ink = ink_hc
+            if use_hom:
+                if cb != eq:
+                    # Fallback is a corrected lattice -- gate on margin-ink
+                    ink_hc = _margin_ink(hc, rb)
+                    ink_cb = _margin_ink(cb, rb)
+                    if ink_hc <= ink_cb:
+                        cb = hc
+                else:
+                    # Fallback is raw equal division -- unreliable.
+                    # Always search for the best phase shift of hom.
+                    # Only adopt hom if the BEST shifted position beats eq.
+                    ink_eq = _margin_ink(eq, rb)
+                    best_ink = _margin_ink(hc, rb)
                     best_shift = 0
                     for shift in range(-30, 31, 2):
                         shifted = [hc[0]] + [x + shift for x in hc[1:5]] + [hc[5]]
@@ -845,10 +852,12 @@ def _sheet_to_cells_with_boxes(
                         ink = _margin_ink(shifted, rb)
                         if ink < best_ink:
                             best_ink, best_shift = ink, shift
-                    if best_shift != 0 and best_ink < ink_hc * 0.75:
-                        hc = [hc[0]] + [x + best_shift for x in hc[1:5]] + [hc[5]]
-                sys.stdout.flush()
-                cb = hc
+                    # Adopt hom only if best shifted position beats eq
+                    if best_ink < ink_eq:
+                        if best_shift != 0:
+                            hc = [hc[0]] + [x + best_shift for x in hc[1:5]] + [hc[5]]
+                        cb = hc
+                    # else: keep eq (hom not better even after phase search)
 
         # ---- COLUMN REWIRE: if the column lattice drifted off the printed
         # grid (equal division over a bad bright extent), pin ALL cards to
