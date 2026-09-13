@@ -7,10 +7,12 @@ Prioritized work items, roughly in impact order. Triage notes from Sep 2026.
 > (header detection, row/col lattice, sheet-bottom clamp, blur gating).
 
 ## 1. Game persistence + a stable address
-**Persistence: DONE Sep 2026.** `GameManager` was pure in-memory, so a
-restart/crash wiped every game. Now durable state (games, players, cards +
-marks, called/current numbers, status, winning pattern, waiting room)
-lives in SQLite (`data/bingo.sqlite3`, gitignored):
+**Both parts DONE Sep 2026.**
+
+**Persistence.** `GameManager` was pure in-memory, so a restart/crash wiped
+every game. Now durable state (games, players, cards + marks, called/current
+numbers, status, winning pattern, waiting room) lives in SQLite
+(`data/bingo.sqlite3`, gitignored):
 
 - `game_store.GameStore` — whole-world snapshot (`save_all`, full-table
   replace so deletions propagate) + single-game `upsert`.
@@ -25,11 +27,14 @@ lives in SQLite (`data/bingo.sqlite3`, gitignored):
 - `test_persistence.py` (fast CI job, no torch): snapshot→store→restore
   round-trip including win detection on a restored board.
 
-**Stable address: still open (infra, not code).** The QR/join URLs are
-already built from `window.location.origin`, so the code self-adapts; the
-printed links just break when the LAN IP changes. Options: tunnel
-(cloudflared / tailscale funnel / ngrok), or a DDNS name + port-forward.
-Choosing one is the next step.
+**Stable address.** Tailscale Funnel on the Orange Pi gives a permanent
+public HTTPS URL that never depends on the LAN IP:
+
+    https://orangepizero3.tail3fad8c.ts.net/
+
+No domain buy, no CA certs, no open router ports — QR code links stay valid
+forever (links are built from `window.location.origin`, so no code change).
+Full setup/ops/troubleshooting notes live in NOTES.md ("Tailscale Funnel…").
 
 ## 2. Scanner regression tests + CI  (DONE Sep 2026)
 - `test_scan_regression.py` replays 14 committed normalized dumps
