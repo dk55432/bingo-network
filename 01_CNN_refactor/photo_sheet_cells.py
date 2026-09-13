@@ -301,7 +301,7 @@ def _find_grid_lines_phone(card_img, verbose=False):
     return horiz_ys, vert_xs
 
 
-def _fix_row_lattice(rb, dip, top, bottom):
+def _fix_row_lattice(rb, dip, top, bottom, gray=None, x0=0, x1=0):
     """Rebuild a uniform 6-boundary row lattice from the snapped interior
     dividers, tolerating missing and mis-snapped dividers:
       - a gap near 2*pitch with a dip peak at the midpoint means the divider
@@ -309,7 +309,24 @@ def _fix_row_lattice(rb, dip, top, bottom):
       - dividers that don't fit the resulting pitch are outliers: drop them.
     The top/bottom borders are extrapolated from the interior pitch, so a
     guessy region bottom (e.g. the image edge under the last card) can't
-    stretch the rows."""
+    stretch the rows.
+    When gray is supplied, the extrapolated TOP border is sanity-checked
+    against the printed card: if the cell it would carve out (rows
+    kept[0]-pitch .. kept[0]) is a solid graphic block instead of a digit
+    row (e.g. a QR/promo plaque printed between the header band and the
+    grid), the whole lattice is anchored one slot too high and every cell
+    slices into the row below.  Detect it and re-anchor the lattice AT the
+    first proven interior line, so cells align with the printed rows."""
+
+    def _top_blank_ratio(y0, y1):
+        """Fraction of rows in [y0,y1) that are near-blank across the card's
+        width.  Digit rows have printed strokes on paper so a noticeable
+        share of rows stay nearly clean; a solid graphic block (QR/promo
+        plaque) covers every row."""
+        if y1 - y0 < 2 or x1 <= x0:
+            return None
+        row = (gray[y0:y1, x0:x1] < 120).mean(axis=1)
+        return float((row < 0.10).mean()), float(row.mean())
     if len(rb) != 6:
         return rb
     divs = sorted(rb[1:5])
@@ -363,6 +380,31 @@ def _fix_row_lattice(rb, dip, top, bottom):
                 if b > a:
                     v = float(a + int(np.argmax(dip[a:b + 1])))
             rb.append(int(round(v)))
+        if gray is not None and x1 > x0 and len(rb) == 6 and rb[1] - rb[0] >= 40:
+            ta, tb = max(top + 1, rb[0] - 8), min(bottom - 1, rb[0] + 8)
+            top_line = float(np.max(dip[ta:tb + 1])) if tb > ta else 0.0
+            top_anchor = float(dip[rb[1]]) if 0 <= rb[1] < dip.size else 0.0
+            top_b, top_d = _top_blank_ratio(rb[0], rb[1])
+            below_b, _ = _top_blank_ratio(rb[1], rb[2])
+            # A QR/promo plaque printed between the header band and the grid
+            # covers every row with ink (no near-blank rows) and is packed
+            # (>40% dark).  Real digit rows - even a first row that overhangs
+            # the band edge - always leave a band of blank rows (>= ~6% of
+            # the cell) and lower ink density, and cards whose top boundary
+            # merely overhangs the header band (blank ratio just below the
+            # row beneath, e.g. card 2) stay anchored as-is.
+            if (top_b is not None and below_b is not None and
+                    top_b < 0.02 and top_d > 0.40 and below_b > 0.03 and
+                    top_b < 0.5 * below_b and
+                    top_line < 60 and top_anchor >= 0.5 * p):
+                # kept[0] is the grid's real top line: anchor the lattice
+                # there.  The last row extends past the card bottom (a
+                # truncated/blank row, flagged if unreadable).
+                rb = [rb[1] + int(round(k * p)) for k in range(6)]
+                for k in range(1, 5):
+                    a, b = max(top + 2, rb[k] - 6), min(bottom - 2, rb[k] + 6)
+                    if b > a:
+                        rb[k] = a + int(np.argmax(dip[a:b + 1]))
         return rb
 
     # fallback: old uniform lattice through all 6 boundaries
@@ -801,7 +843,7 @@ def _sheet_to_cells_with_boxes(
         # bounds (esp. the last card's bottom = image edge) can't stretch the
         # rows and a single mis-snapped divider can't skew the pitch.
         if len(rb) == 6:
-            rb = _fix_row_lattice(rb, grid_sig, top, bottom)
+            rb = _fix_row_lattice(rb, grid_sig, top, bottom, gray, x0, x1)
             gap_ar = np.diff(rb[1:5])
             prev_pitch2 = prev_pitch
             prev_pitch = float(np.median(gap_ar)) if gap_ar.size else None

@@ -350,13 +350,18 @@ def read_sheet_path(model, path):
     return read_sheet_bytes(model, data)
 
 
-def _structure_ok(bboxes):
+def _structure_ok(bboxes, band_tops=None):
     """Validate the detected card layout looks like a real sheet.
 
     Accepts a single card (1 teal band) or a full 3-card sheet whose
     headers are near-equal pitch and width.  Rejects ambiguous layouts
     (extra bands, wildly uneven spacing) so the reader reports a retake
     error instead of emitting garbage grids.
+
+    Pitch is measured on the header bands when available (stable sheet
+    feature); a promo/QR plaque between a card's band and its grid shifts
+    the grid down, so grid-based pitch would falsely reject an otherwise
+    fine sheet.
     """
     n = len(bboxes)
     if n == 0:
@@ -368,8 +373,11 @@ def _structure_ok(bboxes):
     if n > 3:
         return False, (f"detected {n} cards, expected 1 or 3 - the photo "
                        "shows extra teal regions (other sheets in frame?)")
-    tops = [min(v[1] for v in cell_boxes.values())
-            for cell_boxes in bboxes.values()]
+    if band_tops is not None and len(band_tops) == n:
+        tops = list(band_tops)
+    else:
+        tops = [min(v[1] for v in cell_boxes.values())
+                for cell_boxes in bboxes.values()]
     widths = [max(v[2] for v in cell_boxes.values())
               - min(v[0] for v in cell_boxes.values())
               for cell_boxes in bboxes.values()]
@@ -440,7 +448,10 @@ def _read_sheet(model, sheet_bgr, forced_bands=None, pre_boxes=None):
             cv2.rectangle(overlay, (box[0], box[1]), (box[2], box[3]),
                           (0, 220, 0), 2)
     cv2.imwrite(str(dbg / f"overlay_{ts}.png"), overlay)
-    ok, msg = _structure_ok(bboxes)
+    band_tops = [c.get("top") for c in trace.get("cards", [])]
+    if not all(isinstance(t, int) for t in band_tops):
+        band_tops = None
+    ok, msg = _structure_ok(bboxes, band_tops)
     if not ok:
         if forced_bands:
             msg = ("assisted scan couldn't verify a valid 3-card layout - "
