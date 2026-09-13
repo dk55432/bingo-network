@@ -126,6 +126,10 @@ WebSocket Status:
     Game Over
 </button>
 
+<button id="soundToggle"
+        title="Tap anywhere in the app once to enable sound"
+        aria-pressed="true">Sound &amp; vibration: on</button>
+
 <div id="hostBoard"></div>
 
 <script>
@@ -150,6 +154,77 @@ function vibrate(pattern) {
   if (typeof navigator !== "undefined" && navigator.vibrate) {
     try { navigator.vibrate(pattern); } catch (e) {}
   }
+}
+
+// Audible + haptic alert for new calls (see player.html for the same
+// pattern — vibration is iOS-unsupported, so a Web Audio chime is the
+// reliable channel, and iOS only allows audio after a user tap).
+let soundEnabled = localStorage.getItem("sound_enabled") !== "off";
+let audioCtx = null;
+
+function unlockAudio() {
+  if (audioCtx === null) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    audioCtx = new AC();
+  }
+  if (audioCtx.state === "suspended") {
+    audioCtx.resume().catch(() => {});
+  }
+}
+
+["pointerdown", "touchstart", "keydown"].forEach(evt =>
+  window.addEventListener(evt, unlockAudio, { passive: true })
+);
+
+function playTone(freq, when, dur, type = "sine", vol = 0.12) {
+  if (!audioCtx) return;
+  try {
+    const t0 = audioCtx.currentTime + when;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = type;
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(0, t0);
+    gain.gain.linearRampToValueAtTime(vol, t0 + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(t0);
+    osc.stop(t0 + dur + 0.05);
+  } catch (e) {}
+}
+
+function alertTone(kind) {
+  if (kind === "youWon") {
+    playTone(659, 0.0, 0.15);
+    playTone(659, 0.15, 0.10);
+    playTone(988, 0.25, 0.22);
+  } else if (kind === "number") {
+    playTone(880, 0.0, 0.12);
+    playTone(1174, 0.12, 0.18);
+  } else { // "bingo"
+    playTone(523, 0.0, 0.20);
+  }
+}
+
+function announce(kind) {
+  if (!soundEnabled) return;
+  unlockAudio();
+  alertTone(kind);
+  if (kind === "youWon") {
+    vibrate([200, 100, 200]);
+  } else if (kind === "number") {
+    vibrate(150);
+  } else {
+    vibrate(100);
+  }
+}
+
+function updateSoundToggle() {
+  const btn = document.getElementById("soundToggle");
+  if (!btn) return;
+  btn.textContent = "Sound & vibration: " + (soundEnabled ? "on" : "off");
+  btn.setAttribute("aria-pressed", String(soundEnabled));
 }
 
 let pendingNumber = null;
@@ -283,7 +358,7 @@ function handleHostSocketMessage(event) {
     else if (data.type === "number_called") {
         document.getElementById("currentNumber").textContent =
             data.number;
-        vibrate(150);
+        announce("number");
         markCalledNumberHost(data.number);
     }
     else if (data.type === "new_game") {
@@ -577,6 +652,14 @@ document.getElementById("gameOverButton").onclick = function() {
     };
     socket.send(JSON.stringify(message));
 }
+
+document.getElementById("soundToggle").onclick = function() {
+    soundEnabled = !soundEnabled;
+    localStorage.setItem("sound_enabled", soundEnabled ? "on" : "off");
+    updateSoundToggle();
+    if (soundEnabled) announce("number");
+};
+updateSoundToggle();
 
 window.addEventListener("DOMContentLoaded", () => {
   drawHostBoardDoubles("hostBoard");

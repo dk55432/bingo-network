@@ -102,6 +102,9 @@
         <button id="disposeCards">Dispose of current cards</button>
         <button id="startFresh">Start fresh, forget previous session</button>
         <button id="scanCardButton">Scan cards from phone</button>
+        <button id="soundToggle"
+                title="Tap anywhere in the app once to enable sound"
+                aria-pressed="true">Sound &amp; vibration: on</button>
 <p>
 WebSocket Status:
 <span id="status">Disconnected</span>
@@ -218,6 +221,78 @@ function vibrate(pattern) {
   }
 }
 
+// Audible + haptic alerts. Vibration is iOS-unsupported and Android can
+// ignore it, so the reliable channel is a Web Audio chime (iOS only
+// allows audio after a user tap — hence the unlock-on-first-interaction
+// listeners on unlockAudio and the hint in the Sound button's title).
+let soundEnabled = localStorage.getItem("sound_enabled") !== "off";
+let audioCtx = null;
+
+function unlockAudio() {
+  if (audioCtx === null) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    audioCtx = new AC();
+  }
+  if (audioCtx.state === "suspended") {
+    audioCtx.resume().catch(() => {});
+  }
+}
+
+["pointerdown", "touchstart", "keydown"].forEach(evt =>
+  window.addEventListener(evt, unlockAudio, { passive: true })
+);
+
+function playTone(freq, when, dur, type = "sine", vol = 0.12) {
+  if (!audioCtx) return;
+  try {
+    const t0 = audioCtx.currentTime + when;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = type;
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(0, t0);
+    gain.gain.linearRampToValueAtTime(vol, t0 + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(t0);
+    osc.stop(t0 + dur + 0.05);
+  } catch (e) {}
+}
+
+function alertTone(kind) {
+  if (kind === "youWon") {
+    playTone(659, 0.0, 0.15);
+    playTone(659, 0.15, 0.10);
+    playTone(988, 0.25, 0.22);
+  } else if (kind === "number") {
+    playTone(880, 0.0, 0.12);
+    playTone(1174, 0.12, 0.18);
+  } else { // "bingo" — someone else's win
+    playTone(523, 0.0, 0.20);
+  }
+}
+
+function announce(kind) {
+  if (!soundEnabled) return;
+  unlockAudio();
+  alertTone(kind);
+  if (kind === "youWon") {
+    vibrate([200, 100, 200]);
+  } else if (kind === "number") {
+    vibrate(200);
+  } else {
+    vibrate(100);
+  }
+}
+
+function updateSoundToggle() {
+  const btn = document.getElementById("soundToggle");
+  if (!btn) return;
+  btn.textContent = "Sound & vibration: " + (soundEnabled ? "on" : "off");
+  btn.setAttribute("aria-pressed", String(soundEnabled));
+}
+
 function markCell(td) {
   if (td.classList.contains("marked")) return;
   td.classList.add("marked");
@@ -270,7 +345,7 @@ function handleSocketMessage(event) {
     else if (data.type === "number_called") {
         console.log("number_called: ", data.number);
         showCurrentNumber(data.number);
-        vibrate(200);
+        announce("number");
         markCalledNumber(data.number);
         updateRemainingCounts();
     }
@@ -407,6 +482,14 @@ document.getElementById("scanCardButton").onclick = function() {
   window.location.href = `/scan?game_id=${game_id}&player_id=${player_id}`;
 };
 
+document.getElementById("soundToggle").onclick = function() {
+  soundEnabled = !soundEnabled;
+  localStorage.setItem("sound_enabled", soundEnabled ? "on" : "off");
+  updateSoundToggle();
+  if (soundEnabled) announce("number"); // give instant audible feedback
+};
+updateSoundToggle();
+
 function showCurrentNumber(number) {
     document.getElementById("currentNumber").textContent = number;
 }
@@ -494,14 +577,14 @@ function handle_winners(winners) {
     document.getElementById("currentNumber").innerText = str;
    
     if (myWins.length > 0) {
-        vibrate([200, 100, 200]); // distinct pattern: YOU won
+        announce("youWon"); // distinct chime + triple buzz: YOU won
         str = "BINGO! You won on these cards:\n";
         for (const myWin of myWins) {
             str += "Card " + myWin.card_id + "\n";
         }
         alert(str);
     } else {
-        vibrate(100);
+        announce("bingo");
     }
 }
 
