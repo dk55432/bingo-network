@@ -6,16 +6,30 @@ Prioritized work items, roughly in impact order. Triage notes from Sep 2026.
 > crops, NOT end-to-end scan accuracy. The e2e ceiling is geometry
 > (header detection, row/col lattice, sheet-bottom clamp, blur gating).
 
-## 1. Game persistence + a stable address  (next up)
-`game_manager = GameManager()` in `main.py` is pure in-memory, so a
-restart/crash wipes every game; printed QR links embed the LAN IP and break
-on any address change (`host_reconnect_failed`, `invalid_game_id`).
+## 1. Game persistence + a stable address
+**Persistence: DONE Sep 2026.** `GameManager` was pure in-memory, so a
+restart/crash wiped every game. Now durable state (games, players, cards +
+marks, called/current numbers, status, winning pattern, waiting room)
+lives in SQLite (`data/bingo.sqlite3`, gitignored):
 
-- Persist games (SQLite) so a restart doesn't lose them.
-- Stable URL (tunnel/domain) instead of the raw LAN IP — also unlocks
-  HTTPS for guest trust (scanning uses `<input type=file capture>` so it
-  works on plain http, but clipboard + guest quick-start want TLS).
-- Goal: "print a QR code once, bring it to the event, it just works."
+- `game_store.GameStore` — whole-world snapshot (`save_all`, full-table
+  replace so deletions propagate) + single-game `upsert`.
+- `game.py` — `Game.to_persistable()` / `GameManager.snapshot()` /
+  `Game.from_persisted()` / `GameManager.restore_from()`. Connection state
+  (websockets, connected flags) is never persisted; players re-attach by
+  stable `player_id` via the existing `reconnect` flow.
+- `main.py` — restore on startup (lifespan), crash-proof immediate writes
+  on `create_game` and `submit_number`, plus an unconditional 5s autosave
+  (a hall's game set is tiny; no mutation-tracking to miss a code path).
+- Path overridable with `BINGO_STATE_DB` env var.
+- `test_persistence.py` (fast CI job, no torch): snapshot→store→restore
+  round-trip including win detection on a restored board.
+
+**Stable address: still open (infra, not code).** The QR/join URLs are
+already built from `window.location.origin`, so the code self-adapts; the
+printed links just break when the LAN IP changes. Options: tunnel
+(cloudflared / tailscale funnel / ngrok), or a DDNS name + port-forward.
+Choosing one is the next step.
 
 ## 2. Scanner regression tests + CI  (DONE Sep 2026)
 - `test_scan_regression.py` replays 14 committed normalized dumps

@@ -1,4 +1,5 @@
 from player import Player
+from bingo_card import BingoCard
 from enum import Enum
 import logging
 import uuid
@@ -62,6 +63,31 @@ class GameManager:
             logger.info("cleanup_empty_games: removing inactive game "+game_id)
             del self.games[game_id]
         return empty_ids
+
+    def snapshot(self):
+        """Plain-dict snapshot of every live game, for the persistence
+        layer. The in-memory manager is the source of truth."""
+        return {
+            game_id: game.to_persistable()
+            for game_id, game in self.games.items()
+        }
+
+    def restore_from(self, persisted, patterns_config):
+        """Rebuild games from {game_id: persisted dict}.
+
+        patterns_config maps pattern names to WinningPattern instances
+        (main.py's WINNING_PATTERNS). Games whose pattern name is no longer
+        configured are restored with winning_pattern=None — call_number()
+        then treats them as "nobody can win yet" rather than erroring.
+        """
+        for game_id, blob in persisted.items():
+            game = Game.from_persisted(blob, patterns_config)
+            self.games[game_id] = game
+        if persisted:
+            logger.info(
+                "GameManager: restored %d game(s)", len(persisted)
+            )
+        return self
     
     
 class Game:
@@ -92,6 +118,93 @@ class Game:
     def set_winning_pattern(self, name: str, pattern):
         self.winning_pattern_name = name
         self.winning_pattern = pattern
+
+    def to_persistable(self):
+        """Plain-dict snapshot of the game's durable state.
+
+        Connection state (host_websocket, player websockets / connected
+        flags) is transient and never persisted; waiting-room entries lose
+        their websocket too — a waiter whose browser survived still
+        re-joins, and setup_new_game() skips entries whose websocket is no
+        longer around.
+        """
+        return {
+            "game_id": self.game_id,
+            "status": self.status.value,
+            "called_numbers": list(self.called_numbers),
+            "current_number": self.current_number,
+            "winning_pattern_name": self.winning_pattern_name,
+            "last_activity": self.last_activity.isoformat(timespec="seconds"),
+            "waiting_room": {
+                pending_id: {"display_name": entry["display_name"]}
+                for pending_id, entry in self.waiting_room.items()
+            },
+            "players": {
+                player_id: player.to_persistable()
+                for player_id, player in self.players.items()
+            },
+        }
+
+    @classmethod
+    def from_persisted(cls, blob, patterns_config):
+        """Rebuild a Game from a to_persistable() dict (see
+        GameManager.restore_from)."""
+        game = cls()
+        game.game_id = blob.get("game_id", "")
+        try:
+            game.status = GameStatus(blob["status"])
+        except (KeyError, ValueError):
+            game.status = GameStatus.SETUP
+        game.called_numbers = list(blob.get("called_numbers") or [])
+        game.current_number = blob.get("current_number")
+        game.winning_pattern_name = blob.get("winning_pattern_name")
+        name = game.winning_pattern_name
+        if name:
+            game.winning_pattern = patterns_config.get(name)
+            if game.winning_pattern is None:
+                logger.warning(
+                    "game %s references unknown pattern %r — wins disabled",
+                    game.game_id, name,
+                )
+        try:
+            game.last_activity = datetime.fromisoformat(blob["last_activity"])
+        except (KeyError, TypeError, ValueError):
+            game.last_activity = datetime.now()
+        game.waiting_room = {
+            pending_id: {
+                "display_name": entry.get("display_name", ""),
+                "websocket": None,
+            }
+            for pending_id, entry in (blob.get("waiting_room") or {}).items()
+        }
+        for player_id, pd in (blob.get("players") or {}).items():
+            connected_at = None
+            raw = pd.get("connected_at")
+            if raw:
+                try:
+                    connected_at = datetime.fromisoformat(raw)
+                except (TypeError, ValueError):
+                    connected_at = None
+            player = Player(
+                player_id=pd.get("player_id", player_id),
+                display_name=pd.get("display_name", ""),
+                connected=False,
+                websocket=None,
+                connected_at=connected_at,
+            )
+            for card_d in pd.get("cards") or []:
+                grid = card_d.get("grid") or [[0] * 5 for _ in range(5)]
+                card = BingoCard(
+                    card_id=card_d.get("card_id"),
+                    player_id=card_d.get("player_id", player.player_id),
+                    grid=grid,
+                )
+                marked = card_d.get("marked")
+                if marked:
+                    card.marked = marked
+                player.add_card(card)
+            game.add_player(player)
+        return game
 
     def touch(self):
         """Call whenever someone connects or disconnects (join, reconnect,

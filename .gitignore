@@ -7,7 +7,8 @@ output.txt
 node_modules/
 outputs/
 
-# Photo/scan data & intermediate artifacts (personal + large)
+# Runtime state (SQLite persistence); per-deployment, not committed
+data/
 01_CNN_refactor/phone_sheets/
 01_CNN_refactor/phone_sheets2/
 01_CNN_refactor/phone_sheets3/

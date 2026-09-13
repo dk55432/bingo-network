@@ -1,11 +1,16 @@
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
+import asyncio
 import json
+import os
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
 from connection_manager import ConnectionManager
 from game import Game, GameManager, GameStatus, canonicalize_number
+from game_store import GameStore
 from player import Player
 from bingo_card import BingoCard
 from bingo_card_factory import create_test_card
@@ -13,17 +18,75 @@ import patterns_parser
 from bingo_scan import router as scan_router, numeric_grid_to_labeled_grid, GRID_SIZE
 import logging
 
-app = FastAPI()
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
+manager = ConnectionManager()
+game_manager = GameManager()
+
+STATE_DB_PATH = os.getenv(
+    "BINGO_STATE_DB",
+    str(Path(__file__).resolve().parent / "data" / "bingo.sqlite3"),
+)
+store = GameStore(STATE_DB_PATH)
+
+# Autosave cadence: game sets are small, so an unconditional whole-world
+# snapshot every few seconds is cheap and needs no mutation tracking (no
+# risk of missing a handler that changed state).
+AUTOSAVE_INTERVAL_SECONDS = 5
+
+
+def _flush_state():
+    if game_manager.games:
+        try:
+            store.save_all(game_manager.snapshot())
+        except Exception:
+            logger.exception("_flush_state: failed to persist games")
+
+
+async def _autosave_loop():
+    while True:
+        await asyncio.sleep(AUTOSAVE_INTERVAL_SECONDS)
+        _flush_state()
+
+
+@asynccontextmanager
+async def lifespan(app):
+    persisted = store.load_all()
+    if persisted:
+        game_manager.restore_from(persisted, WINNING_PATTERNS)
+        logger.info(
+            f"lifespan: restored {len(persisted)} game(s) from "
+            f"{STATE_DB_PATH}"
+        )
+    task = asyncio.create_task(_autosave_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        _flush_state()
+        store.close()
+
+
+def _persist_game(game):
+    try:
+        store.upsert(game.game_id, game.to_persistable())
+    except Exception:
+        logger.exception(
+            f"_persist_game: failed to persist game {game.game_id}"
+        )
+
+app = FastAPI(lifespan=lifespan)
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 app.include_router(scan_router)
-manager = ConnectionManager()
-game_manager = GameManager()
 app.state.game_manager = game_manager
 app.state.connection_manager = manager
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
 templates = Jinja2Templates(directory="templates")
 
 # Loaded once at server startup. Read-only after this point — every game
@@ -236,6 +299,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 game.host_websocket = websocket
                 current_game_id = game.game_id
                 game.set_winning_pattern(DEFAULT_PATTERN_NAME, WINNING_PATTERNS[DEFAULT_PATTERN_NAME])
+                # Crash-proof creation: the game must exist on disk before
+                # we tell the host it exists.
+                _persist_game(game)
                 await manager.send_to_player(
                     websocket,
                     json.dumps({
@@ -281,6 +347,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 number = canonicalize_number(data["value"])
                 logger.info("submit_number: just received number: " + str(number))
                 result = game.call_number(number)
+                # A called number is exactly what must survive a restart —
+                # write it through immediately, don't wait for autosave.
+                _persist_game(game)
                 logger.debug("submit_number: broadcasting Hx: "+str(game.called_numbers))
                 await manager.broadcast_to_game(
                     json.dumps({

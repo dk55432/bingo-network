@@ -68,3 +68,9 @@ class BingoCard:
             "grid": self.grid,
             "marked": self.marked
         }
+
+
+    def to_persistable(self):
+        # Same shape as to_dict() — kept as a separate name so the restore
+        # path in game.py stays explicit about what reaches the store.
+        return self.to_dict()

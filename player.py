@@ -43,5 +43,20 @@ class Player:
     
     def get_player_id(self):
         return self.player_id
+
+    def to_persistable(self):
+        """Everything needed to rebuild this player after a restart.
+
+        Transient state (connected flag, websocket) is intentionally left
+        out — a reconnected player is re-associated by player_id at the
+        websocket layer (see main.py "reconnect")."""
+        return {
+            "player_id": self.player_id,
+            "display_name": self.display_name,
+            "connected_at": (
+                self.connected_at.isoformat() if self.connected_at else None
+            ),
+            "cards": [card.to_persistable() for card in self.cards],
+        }
         
     
