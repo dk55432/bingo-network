@@ -28,6 +28,7 @@ from PIL import Image, ImageOps
 from torchvision import transforms
 
 import photo_sheet_cells
+import learning_audit
 
 COLUMN_RANGES = [(1, 15), (16, 30), (31, 45), (46, 60), (61, 75)]
 FREE = (2, 2)
@@ -501,7 +502,11 @@ def _read_sheet(model, sheet_bgr, forced_bands=None, pre_boxes=None):
         cards.append(result)
 
     if by_card:
-        _persist_pending_cells(sheet_bgr, by_card, ts)
+        auto_grids = []
+        for card in cards:
+            auto_grids.append(
+                [[cell["value"] for cell in row] for row in card["grid"]])
+        _persist_pending_cells(sheet_bgr, by_card, ts, auto_grids)
 
     return {"cards": cards, "scan_id": str(ts), "debug": {
         "dump_in": str(dbg / f"in_{ts}.png"),
@@ -517,12 +522,17 @@ def _read_sheet(model, sheet_bgr, forced_bands=None, pre_boxes=None):
 PENDING_DIR = Path("/tmp/phone_learning_pending")
 
 
-def _persist_pending_cells(sheet_bgr, by_card, scan_id):
+def _persist_pending_cells(sheet_bgr, by_card, scan_id, auto_grids=None):
     """Save the raw cell crops for a successful read so a later user
     confirmation (/cards POST with the same scan_id) can pair each cell
     with its corrected number and grow the training set.  Grayscale
     per-cell JPEGs, same stats as train_phone_cells.build writes.  Blank
-    cells are skipped so we never label empty crops."""
+    cells are skipped so we never label empty crops.
+
+    auto_grids (list of 5x5 value grids, one per card in cid order) is
+    dumped next to the crops as auto.json so the confirmation path can
+    diff the user's final grids against what the reader auto-recognized
+    and tag cells the user actually corrected."""
     out = PENDING_DIR / str(scan_id)
     out.mkdir(parents=True, exist_ok=True)
     n = 0
@@ -535,6 +545,8 @@ def _persist_pending_cells(sheet_bgr, by_card, scan_id):
                 continue
             cv2.imwrite(str(out / f"c{cid}_r{r}c{c}.jpg"), g)
             n += 1
+    if auto_grids is not None:
+        learning_audit.dump_auto_json(out / "auto.json", auto_grids)
     return n
 
 

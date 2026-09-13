@@ -316,6 +316,12 @@ def _save_learning_cells(payload: ConfirmCardsRequest) -> int:
     keyed by scan_id) with the user's reviewed/corrected grids and write one
     labeled training image per cell into LEARNING_DIR/<number>/.
 
+    Each saved cell's filename embeds the scan epoch AND the git SHA of the
+    reader code that produced the crop (self-auditing corpus), and a
+    correction tag "_x" when the user's final number differs from what the
+    reader auto-recognized — so retraining can focus on cells the user
+    actually corrected rather than the ones that sailed through.
+
     Fully best-effort: a missing scan_id, a stale/missing pending dir, or a
     pairing hiccup never fails the card save — the learning store just gets
     nothing that round."""
@@ -329,10 +335,28 @@ def _save_learning_cells(payload: ConfirmCardsRequest) -> int:
         logger.info("learning: no pending cells for scan %s", safe)
         return 0
 
+    try:
+        import learning_audit as la
+    except ImportError:
+        sys.path.insert(0, str(Path(__file__).resolve().parent
+                               / "01_CNN_refactor"))
+        import learning_audit as la
+    cell_was_corrected = la.cell_was_corrected
+    load_auto_json = la.load_auto_json
+    repo_short_sha = la.repo_short_sha
+    save_cell_name = la.save_cell_name
+
+    sha = repo_short_sha(Path(__file__).resolve().parent)
+    auto = load_auto_json(pending / "auto.json")
     n = 0
+    corrected = 0
     try:
         for i, grid in enumerate(payload.grids):
             cid = i + 1  # reader names pending crops c1..cN in card order
+            if auto and i < len(auto):
+                auto_grid = auto[i]
+            else:
+                auto_grid = None
             for row in range(GRID_SIZE):
                 for col in range(GRID_SIZE):
                     if row == 2 and col == 2:
@@ -343,18 +367,29 @@ def _save_learning_cells(payload: ConfirmCardsRequest) -> int:
                     src = pending / f"c{cid}_r{row}c{col}.jpg"
                     if not src.is_file():
                         continue
+                    auto_val = None
+                    if auto_grid is not None:
+                        try:
+                            auto_val = auto_grid[row][col]
+                        except (IndexError, TypeError):
+                            auto_val = None
+                    was_corrected = cell_was_corrected(auto_val, val)
                     out_dir = LEARNING_DIR / str(val)
                     out_dir.mkdir(parents=True, exist_ok=True)
-                    dst = out_dir / f"{safe}_c{cid}_r{row}c{col}.jpg"
+                    dst = out_dir / save_cell_name(
+                        safe, sha, cid, row, col, was_corrected)
                     if dst.exists():
                         continue
                     shutil.copyfile(src, dst)
                     n += 1
+                    if was_corrected:
+                        corrected += 1
         shutil.rmtree(pending, ignore_errors=True)
     except Exception:
         logger.exception("learning: failed pairing crops for scan %s", safe)
     if n:
-        logger.info("learning: captured %d confirmed cells from scan %s", n, safe)
+        logger.info("learning: captured %d confirmed cells from scan %s "
+                    "(%d corrected)", n, safe, corrected)
     return n
 
 

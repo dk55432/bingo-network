@@ -50,14 +50,24 @@ Full setup/ops/troubleshooting notes live in NOTES.md ("Tailscale Funnel…").
   strong e2e data (`phone_sheets/`) is gitignored/100+MB.
 
 ## 3. Retrain loop automation + eval gate
-- Retention: `train_learning.py` fine-tunes on confirmed cells; a
-  `MIN_SCAN_TS` provenance gate keeps stale/mis-segmented cells out.
-- Ship gate: evaluate candidate `.pth` vs the current one on the valid
-  split and refuse to deploy on regression (the last retrain shipped
-  without this).
-- Record the git SHA next to each confirmed cell (self-auditing corpus).
-- Revisit correction-tagging so retraining can focus on user-corrected
-  cells rather than all confirms.
+**Ship gate + corpus audit DONE Sep 2026.**
+
+- **Ship gate** (`01_CNN_refactor/eval_gate.py`): a candidate `.pth` is
+  validated against the incumbent runtime checkpoint on the SAME held-out
+  valid split; train_learning.py now **exits 1 and refuses to overwrite**
+  a checkpoint that regresses valid accuracy past `SHIP_TOL` (0.005) —
+  the last retrain shipped without any gate. CLI:
+  `python eval_gate.py --candidate new.pth`.
+- **Corpus audit**: each confirmed cell's filename now embeds the git SHA
+  of the reader code that produced the crop (`<scan>_<sha>_c.._r..c..[_x].jpg`)
+  plus an `_x` correction tag for cells the user actually changed (diffed
+  against the scan-time `auto.json`). Rules live in the torch-free
+  `learning_audit.py`, tested in CI.
+- **Retention**: `train_learning.py` keepers the `MIN_SCAN_TS` provenance
+  gate and now samples corrected cells `CORRECTION_WEIGHT`x (focus on
+  user-fixes over pass-through confirms).
+- *Open:* none blocking a retrain — harvest post-cutover confirmed cells
+  via normal hall scanning, then run `train_learning.py` on the Mac.
 
 ## 4. Legacy cleanup
 `parse_bingo_sheet.py` (2518 lines), `pipeline.py`, `00_card_scan_refactor/`,

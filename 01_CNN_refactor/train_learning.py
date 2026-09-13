@@ -38,6 +38,8 @@ from train_phone_cells import (  # noqa: E402
     test_tf,
     train_tf,
 )
+from eval_gate import evaluate_state  # noqa: E402
+import learning_audit  # noqa: E402
 
 LEARNING = Path(__file__).parent / "learning_cells"
 BACKUP_DIR = Path(__file__).parent / "learning_backups"
@@ -58,6 +60,16 @@ BATCH = 32
 # self-tuning instead of a hand-picked number.
 PATIENCE = 6
 VALID_EVERY = 1
+# SHIP GATE: never overwrite the runtime checkpoint with a candidate whose
+# held-out valid accuracy regresses past this (run on each retrain; the
+# last retrain shipped without any gate).  Same variance math as
+# eval_gate.DEFAULT_TOL.
+SHIP_TOL = 0.005
+# Correction focus: confirmed cells the user actually corrected carry the
+# strongest training signal, so merge_learning drops that many extra copies
+# of each "_x" crop into the train split (plain shuffling then over-samples
+# them ~this many times vs confirmed-as-scanned cells).
+CORRECTION_WEIGHT = 4
 
 
 def backup_learning():
@@ -86,9 +98,15 @@ def merge_learning():
     scan id, so re-runs are idempotent and different scans never clash.
     Cells whose embedded scan timestamp is before MIN_SCAN_TS are skipped —
     they were recorded while older scanner/parsing bugs were live and their
-    labels are unreliable (stale-corpus poison guard)."""
+    labels are unreliable (stale-corpus poison guard).
+
+    Corrected cells (name carries the "_x" correction tag) are copied
+    CORRECTION_WEIGHT times so the plain-shuffle fine-tune samples them
+    that many more times — retraining focuses on what the user actually
+    fixed, not the cells that sailed through confirmation."""
     n = 0
     skipped = 0
+    corrected = 0
     for num_dir in sorted(LEARNING.iterdir()):
         if not num_dir.is_dir():
             continue
@@ -97,18 +115,29 @@ def merge_learning():
         for f in num_dir.iterdir():
             if f.suffix.lower() != ".jpg":
                 continue
-            scan_id = f.name.split("_", 1)[0]
-            if not scan_id.isdigit() or int(scan_id) < MIN_SCAN_TS:
+            scan_id = learning_audit.scan_epoch_of(f.name)
+            if scan_id is None or scan_id < MIN_SCAN_TS:
                 skipped += 1
                 continue
             target = dst / f.name
             if not target.exists():
                 shutil.copy(f, target)
                 n += 1
+            if learning_audit.is_corrected_name(f.name):
+                corrected += 1
+                stem = f.stem
+                for k in range(1, CORRECTION_WEIGHT):
+                    dup = dst / f"{stem}_k{k}.jpg"
+                    if not dup.exists():
+                        shutil.copy(f, dup)
+                        n += 1
     if skipped:
         cutoff = _dt.datetime.fromtimestamp(MIN_SCAN_TS)
         print(f"merge_learning: excluded {skipped} cells with scan timestamp "
               f"before {cutoff} (stale-corpus gate)")
+    if corrected:
+        print(f"merge_learning: {corrected} cells were user-corrected; "
+              f"sampled {CORRECTION_WEIGHT}x (correction focus)")
     return n
 
 
@@ -203,6 +232,28 @@ def main():
             pr += model(imgs.to(device)).argmax(1).cpu().tolist()
             ys += labs.tolist()
     print(classification_report(ys, pr, zero_division=0))
+
+    # SHIP GATE: compare this run's candidate (best_state) with the
+    # incumbent runtime checkpoint on the SAME held-out valid split, and
+    # refuse to overwrite on regression.  The incumbent is loaded fresh so
+    # the file hasn't been moved to .bak yet.
+    if best_state is not None:
+        try:
+            inc = evaluate_state(
+                torch.load(CKPT, map_location=device, weights_only=True),
+                vl, device)
+            cand = evaluate_state(best_state, vl, device)
+            delta = cand["acc"] - inc["acc"]
+            if delta < -SHIP_TOL:
+                print(f"SHIP GATE FAILED: candidate valid acc "
+                      f"{cand['acc']:.4f} is {abs(delta):.4f} below incumbent "
+                      f"{inc['acc']:.4f} (tol {SHIP_TOL:.4f}).  NOT saving — "
+                      f"{CKPT} unchanged.")
+                raise SystemExit(1)
+            print(f"SHIP GATE PASS: valid acc {inc['acc']:.4f} -> "
+                  f"{cand['acc']:.4f} (delta {delta:+.4f})")
+        except (FileNotFoundError, RuntimeError, KeyError) as exc:
+            print(f"SHIP GATE SKIPPED (couldn't evaluate incumbent: {exc})")
 
     if CKPT.exists():
         shutil.copy(CKPT, CKPT.with_suffix(".pth.bak"))

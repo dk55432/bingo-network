@@ -5,7 +5,7 @@ to speed on the machine-learning card-reading pipeline in `01_CNN_refactor/`
 without the original author's memory. Read this first; the rest of the repo
 (code + this file) is the source of truth.
 
-Last updated: 2026-08-31.
+Last updated: 2026-09-12.
 
 ## What the pipeline does
 
@@ -32,23 +32,31 @@ Run from `01_CNN_refactor/`:
    - Batch B: `phone_sheets3/` **minus sheet 1** (bad frame)
    - SPLITS: sheets 1..24 → train, 25..30 → valid
    - Each sheet's cells are extracted via `sheet_to_cells_teal()` and cross-referenced against ground-truth `parse_truth()`; blank/no-truth cells are dropped.
-3. `merge_learning()` — copies every confirmed cell from `learning_cells/<number>/*.jpg` into `/tmp/phone_cells_v2/train/<number>/`. Filenames embed the scan id, so re-runs are idempotent.
+3. `merge_learning()` — copies every confirmed cell from `learning_cells/<number>/*.jpg` into `/tmp/phone_cells_v2/train/<number>/`. Filenames embed the scan id, so re-runs are idempotent. A staleness gate (`MIN_SCAN_TS`) skips cells harvested before the corrected reader went live (they'd poison the fine-tune). Cells the user actually *corrected* (filename carries the `_x` tag) are copied `CORRECTION_WEIGHT` (4) times, so the plain-shuffle fine-tune focuses ~4x harder on corrections than on confirmations that sailed through.
 4. Fine-tunes `cell_classifier_phone.pth` with **early stopping**: lr 1e-4
    (Adam, StepLR step=10 gamma=0.5, batch=32), up to **30 epochs**, tracking the
    best valid accuracy. Stops early when valid accuracy hasn't improved for
    `PATIENCE` (6) consecutive epochs, then restores and saves the best-epoch
    weights (so a long run never overfits — the epoch count is self-tuning; the
    plateau is typically around epoch 15-20 for the current corpus size).
-5. Saves the new checkpoint as `cell_classifier_phone.pth`, old one → `.pth.bak`.
+5. **SHIP GATE** (bugs backstop): before touching the checkpoint, the candidate
+   best-epoch weights are validated against the incumbent
+   `cell_classifier_phone.pth` on the SAME held-out valid split
+   (`eval_gate.py`). If the candidate's valid accuracy drops more than
+   `SHIP_TOL` (0.005) below the incumbent, training **exits 1 and does NOT
+   overwrite the runtime checkpoint** — the old model stays in service. The
+   last retrain before this shipped un-gated; gate a checkpoint by hand with
+   `python eval_gate.py --candidate new.pth`.
+6. Saves the new checkpoint as `cell_classifier_phone.pth`, old one → `.pth.bak`.
 
 Verification output is a `classification_report` on the valid split. Last retrain
 was 917 → 2175 confirmed cells.
 
 ## How confirmed cells are produced (the learning loop)
 
-1. `POST /scan-card` (CNN path) writes each cell crop to `/tmp/phone_learning_pending/<scan_id>/` and returns `scan_id` (and `debug.ts`).
+1. `POST /scan-card` (CNN path) writes each cell crop to `/tmp/phone_learning_pending/<scan_id>/`, alongside `auto.json` (the exact 5x5 values the reader auto-recognized per card), and returns `scan_id` (and `debug.ts`).
 2. `templates/scan.html` stores `lastScanId`.
-3. When the user confirms, `POST /cards {game_id, player_id, grids, scan_id}` → `_save_learning_cells` pairs grid i (card id = i+1) with the pending crops, writing `learning_cells/<number>/<scan_id>_c<cid>_r<r>c<c>.jpg`. Best-effort — failures are non-fatal.
+3. When the user confirms, `POST /cards {game_id, player_id, grids, scan_id}` → `_save_learning_cells` pairs grid i (card id = i+1) with the pending crops and diffs each cell against `auto.json` to tag corrections, writing `learning_cells/<number>/<scan_id>_<git_sha>_c<cid>_r<r>c<c>.jpg` (read-only confirmations) or `..._x.jpg` (user corrected the number). The embedded git SHA is the self-audit record: it names the exact reader code that produced each crop, so a corpus harvested under a buggy reader can be excluded/audited. Best-effort — failures are non-fatal. Naming/provenance/diff rules live in the torch-free `learning_audit.py` (unit-tested in CI).
 
 ## Gray / washed-out sheets — the 3-tap assist
 
@@ -94,7 +102,7 @@ Geometery keys:
 - `cnn_reader.py` — `read_sheet_bytes`, `_read_sheet`, `cells_from`, `cells_from_forced`, `cell_logits`, `decode_card`, `_persist_pending_cells`.
 - `photo_sheet_cells.py` — `teal_card_bboxes`, `_grid_dip`, `_snap`, `_card_y_extent`, `_frame_bright_extent`, `sheet_to_cells_teal`, `sheet_to_cells_forced`, `forced_card_bboxes`.
 - `extract_scan_cells.py` — `_BAND_FAMILIES`, `_header_hue_spec`, `_sheet_structure`, `sheet_to_cells`.
-- `train_learning.py`, `train_phone_cells.py`.
+- `train_learning.py`, `train_phone_cells.py`, `eval_gate.py` (ship gate: refuse to overwrite the runtime checkpoint on valid-acc regression), `learning_audit.py` (torch-free filename/SHA/correction-tag rules for the confirmed corpus).
 - `bingo_scan.py` — `POST /scan-card`, `POST /scan-assist`, `GET /scan-debug/{ts}.png`, `GET /scan-debug-in/{ts}.png`, `POST /cards` (confirm), `_save_learning_cells`.
 - `templates/scan.html` — assist panel, `handleScanSuccess`, `partial_sheet` steering.
 
