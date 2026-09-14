@@ -236,16 +236,92 @@
   ]
  },
  "1789236577": {
-  "cards": 0,
-  "partial_sheet": false,
-  "error": "no header bands detected - reframe so the sheet fills the frame (all 3 cards, flat and top-lit) and try again",
-  "grids": []
+  "cards": 1,
+  "partial_sheet": true,
+  "error": null,
+  "grids": [
+   [
+    [
+     13,
+     29,
+     34,
+     59,
+     75
+    ],
+    [
+     6,
+     18,
+     37,
+     52,
+     67
+    ],
+    [
+     11,
+     21,
+     null,
+     54,
+     63
+    ],
+    [
+     7,
+     22,
+     33,
+     49,
+     62
+    ],
+    [
+     8,
+     23,
+     35,
+     47,
+     69
+    ]
+   ]
+  ]
  },
  "1789237982": {
-  "cards": 0,
-  "partial_sheet": false,
-  "error": "card layout is uneven (pitches [230, 365], widths [609, 609, 609]) - retake flat with the whole sheet in frame",
-  "grids": []
+  "cards": 1,
+  "partial_sheet": true,
+  "error": null,
+  "grids": [
+   [
+    [
+     11,
+     30,
+     37,
+     58,
+     71
+    ],
+    [
+     8,
+     21,
+     32,
+     55,
+     61
+    ],
+    [
+     5,
+     27,
+     null,
+     53,
+     75
+    ],
+    [
+     7,
+     19,
+     35,
+     60,
+     62
+    ],
+    [
+     2,
+     23,
+     45,
+     54,
+     72
+    ]
+   ]
+  ]
  },
  "1789239712": {
   "cards": 3,
@@ -416,39 +492,39 @@
   "grids": [
    [
     [
-     6,
-     21,
-     39,
-     53,
-     null
+     5,
+     18,
+     37,
+     52,
+     64
     ],
     [
-     1,
-     16,
-     35,
-     60,
-     null
+     13,
+     24,
+     42,
+     53,
+     70
     ],
     [
      7,
      19,
      null,
-     59,
-     null
+     58,
+     66
     ],
     [
-     8,
-     29,
-     41,
-     54,
-     null
+     2,
+     25,
+     35,
+     48,
+     61
     ],
     [
-     4,
-     17,
-     36,
-     57,
-     null
+     11,
+     26,
+     45,
+     60,
+     74
     ]
    ]
   ]

@@ -134,7 +134,8 @@ def _warp_sheet(img):
 
 def _normalize(img):
     """Downscale to scan scale; stretch luminance so paper is bright while
-    preserving hue (teal band detection needs color)."""
+    preserving hue (teal band detection needs color).  Apply CLAHE to
+    enhance local contrast for low-light robustness."""
     H, W = img.shape[:2]
     scale = _SCAN_WIDTH / W
     r = img
@@ -142,7 +143,11 @@ def _normalize(img):
         r = cv2.resize(img, (_SCAN_WIDTH, int(round(H * scale))),
                        interpolation=cv2.INTER_AREA)
     yuv = cv2.cvtColor(r, cv2.COLOR_BGR2YUV)
-    y = yuv[:, :, 0].astype(np.float32)
+    y = yuv[:, :, 0]
+    # Apply CLAHE to enhance local contrast, especially helpful in low light
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    y = clahe.apply(y)
+    y = y.astype(np.float32)
     lo, hi = np.percentile(y, (2, 98))
     y2 = np.clip((y - lo) * (255.0 / max(1.0, hi - lo)), 0, 255)
     yuv[:, :, 0] = y2.astype(np.uint8)

@@ -134,6 +134,23 @@ def _header_hue_spec(img):
             candidates.append((score, -idx, (hl, hh, s_min, v_min, rowfrac)))
     if candidates:
         return max(candidates)[2]
+    # Try relaxed thresholds for other color families (low-light robustness)
+    # Similar to teal's relaxed attempts, but for all non-teal families.
+    relaxed_candidates = []
+    for idx, ((hl, hh), s_min, v_min, rowfrac) in enumerate(_BAND_FAMILIES[1:]):
+        # Try progressively relaxed thresholds for low-light conditions
+        for s_min, v_min in [(60, 80), (40, 60), (30, 40), (20, 30), (15, 20)]:
+            relaxed_mask = _hue_in(h, hl, hh) & (s > s_min) & (v > v_min)
+            relaxed_bands = _mask_bands(relaxed_mask, rowfrac)
+            score, ok = _sheet_structure(relaxed_bands, img.shape[0])
+            n_bands = len(relaxed_bands)
+            # Only accept if structurally valid (ok=True) to avoid false positives
+            if ok:
+                relaxed_candidates.append((score, -idx, (hl, hh, s_min, v_min, rowfrac)))
+                break  # Use the first working relaxed threshold for this family
+    if relaxed_candidates:
+        return max(relaxed_candidates)[2]
+
     # Nothing clearly sheet-like yet.  The raw-score and dominant-hue
     # fallbacks exist so unseen print colors still get a chance, but they
     # only count if the bands they produce are themselves structurally

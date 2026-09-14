@@ -872,6 +872,18 @@ def _sheet_to_cells_with_boxes(
                 use_hom = False
                 # Fall through to keep cb
 
+            # Position check: hom columns must overlap with the card's
+            # horizontal extent (x0..x1). If hom projects completely
+            # outside the card's extent, it's matching something else
+            # (table edge, reflection) and should be rejected.
+            if use_hom:
+                if hom_span > 0:
+                    # Check if any hom column falls within the card extent
+                    overlap = any(x0 <= x <= x1 for x in hc)
+                    if not overlap:
+                        use_hom = False
+                        # Fall through to keep cb
+
             def _margin_ink(cols, rows):
                 total = 0
                 for r in range(len(rows) - 1):
