@@ -778,6 +778,31 @@ def _sheet_to_cells_with_boxes(
                 sum(dv[cb[k]] for k in range(1, 5))):
             cb = cand
 
+        # Pitch sanity: if BOTH hom unavailable AND cand failed (cb == cb_eq),
+        # the equal-division extent is likely wrong. Narrow/widen to ~95px pitch.
+        hom_available = hom_cols is not None and hom_cols[i] is not None
+        if not hom_available and cb == cb_eq:
+            eq_pitch = (cb_eq[-1] - cb_eq[0]) / 5.0
+            if eq_pitch > 130:
+                target_width = int(95.0 * 5)
+                cur_width = cb_eq[-1] - cb_eq[0]
+                excess = cur_width - target_width
+                card_x0 = cb_eq[0] + excess // 2
+                card_x1 = card_x0 + target_width
+                width = card_x1 - card_x0
+                cb_eq = [card_x0 + round(width * k / 5) for k in range(6)]
+                cb = list(cb_eq)
+            elif eq_pitch < 70:
+                target_width = int(95.0 * 5)
+                cur_width = cb_eq[-1] - cb_eq[0]
+                if cb_eq[0] > 0 and cb_eq[-1] < gray.shape[1]:
+                    excess = target_width - (cb_eq[-1] - cb_eq[0])
+                    card_x0 = max(0, cb_eq[0] - excess // 2)
+                    card_x1 = card_x0 + target_width
+                    width = card_x1 - card_x0
+                    cb_eq = [card_x0 + round(width * k / 5) for k in range(6)]
+                    cb = list(cb_eq)
+
         # Homography is used ONLY when it disagrees with the equal-division+dip
         # columns just computed -- i.e. when the printed grid is faint and the
         # dip/Hough lattice floats off it (B 121->97, C 142->101, S2 124->97).
@@ -788,6 +813,7 @@ def _sheet_to_cells_with_boxes(
         # recovered the true lattice and the header match would merely
         # re-draw the same grid shifted a few px, so we keep the proven
         # equal-division columns (approved sheets stay byte-stable).
+        use_hom = False
         use_hom = False
         if hom_cols is not None and hom_cols[i] is not None:
             h_gaps = np.diff(np.array(hom_cols[i][1:5], float))
