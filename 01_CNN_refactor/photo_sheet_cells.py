@@ -898,32 +898,18 @@ def _sheet_to_cells_with_boxes(
                 return total
 
             if use_hom:
-                if cb != eq:
-                    # Fallback is a corrected lattice -- gate on margin-ink
+                if cb == cb_eq:
+                    # No corrected lattice available (cand failed).
+                    # Homography is the best signal we have; adopt it.
+                    cb = hc
+                else:
+                    # A corrected lattice exists (cb != cb_eq).
+                    # The corrected lattice was validated by Hough lines;
+                    # only adopt hom if it's CLEARLY better (>10% less ink).
                     ink_hc = _margin_ink(hc, rb)
                     ink_cb = _margin_ink(cb, rb)
-                    if ink_hc <= ink_cb:
+                    if ink_hc < ink_cb * 0.9:
                         cb = hc
-                else:
-                    # Fallback is raw equal division -- unreliable.
-                    # Always search for the best phase shift of hom.
-                    # Only adopt hom if the BEST shifted position beats eq.
-                    ink_eq = _margin_ink(eq, rb)
-                    best_ink = _margin_ink(hc, rb)
-                    best_shift = 0
-                    for shift in range(-30, 31, 2):
-                        shifted = [hc[0]] + [x + shift for x in hc[1:5]] + [hc[5]]
-                        if min(shifted) < 0 or max(shifted) >= gray.shape[1]:
-                            continue
-                        ink = _margin_ink(shifted, rb)
-                        if ink < best_ink:
-                            best_ink, best_shift = ink, shift
-                    # Adopt hom only if best shifted position beats eq
-                    if best_ink < ink_eq:
-                        if best_shift != 0:
-                            hc = [hc[0]] + [x + best_shift for x in hc[1:5]] + [hc[5]]
-                        cb = hc
-                    # else: keep eq (hom not better even after phase search)
 
         # ---- COLUMN REWIRE: if the column lattice drifted off the printed
         # grid (equal division over a bad bright extent), pin ALL cards to
