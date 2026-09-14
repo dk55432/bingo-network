@@ -671,6 +671,20 @@ def _sheet_to_cells_with_boxes(
     sheet_aligned = all(abs(b[0] - min(b[0] for b in boxes)) <= 15
                         for b in boxes)
 
+# When cards are not x-aligned, the header boxes may have different
+    # widths (e.g. one card's header detection includes table to the right).
+    # The LEFT edge of the header is typically at the true card paper edge,
+    # while the right edge may extend onto the table.  Use the LEFT edge of
+    # each header as the card's left edge, with a fixed TARGET_CARD_WIDTH.
+    TARGET_CARD_WIDTH = 475
+    card_exts = []
+    for i, (hx0, y0, hx1, y1) in enumerate(boxes):
+        # Left edge of header = left edge of card paper
+        card_exts.append((hx0, hx0 + TARGET_CARD_WIDTH))
+
+    # For aligned sheets, still use shared frame extent (already computed)
+    # but for unaligned, use normalized per-card extents above.
+
     cells_out = []
     prev_pitch = None
     prev_pitch2 = None
@@ -685,7 +699,12 @@ def _sheet_to_cells_with_boxes(
             continue
         
         # Use header box for vertical position (y), but frame extent for horizontal (x)
-        x0, x1 = grid_x0, grid_x1
+        # Use per-card extent when cards are not x-aligned;
+        # otherwise use shared frame extent.
+        if sheet_aligned:
+            x0, x1 = grid_x0, grid_x1
+        else:
+            x0, x1 = card_exts[i]
 
 # ---- ROWS: proven dip + snap ----
         grid_sig = _grid_dip(gray, x0, x1, top, bottom)
@@ -1090,6 +1109,64 @@ def _frame_bright_extent(gray, header_boxes=None):
     if xs.size == 0:
         return None
     return int(xs[0]), int(xs[-1])
+
+
+
+
+def _frame_bright_extent_card(gray, hx0, hx1, top, bottom):
+    """Per-card bright extent from the card body vertical range.
+    Finds the LEFTMOST bright region (card paper) within the header x-range,
+    ignoring table/desk to the right.  The card paper is typically the
+    leftmost significant bright region in the card body."""
+    h = gray.shape[0]
+    y0 = top + (bottom - top) // 3
+    y1 = top + 2 * (bottom - top) // 3
+    if y1 <= y0:
+        y0, y1 = top, bottom
+    band = gray[y0:y1, hx0:hx1]
+    if band.size == 0:
+        return None
+    colmean = band.mean(axis=0).astype(np.uint8)
+    thr, _ = cv2.threshold(colmean, 0, 255,
+                           cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    bright = colmean > max(40, int(thr) * 0.90)
+    xs = np.where(bright)[0]
+    if xs.size == 0:
+        return None
+    # Find LEFTMOST significant bright run (card paper is leftmost)
+    # Group contiguous bright pixels into runs
+    runs = []
+    in_run = False
+    start = 0
+    for i, b in enumerate(bright):
+        if b and not in_run:
+            in_run = True
+            start = i
+        elif not b and in_run:
+            in_run = False
+            runs.append((start, i - 1))
+    if in_run:
+        runs.append((start, len(bright) - 1))
+    # Filter to runs with sufficient width (>= 50px)
+    runs = [(s, e) for s, e in runs if e - s >= 50]
+    if not runs:
+        # Fallback: full bright extent
+        xs = np.where(bright)[0]
+        if xs.size == 0:
+            return None
+        return int(hx0 + xs[0]), int(hx0 + xs[-1])
+    # Use LEFTMOST run that starts near the left edge of the header
+    # (card paper is typically at the left edge of the card)
+    # Prefer runs that start within 100px of the left edge
+    lefts = [s for s, e in runs]
+    best_idx = 0
+    for i, s in enumerate(lefts):
+        if s <= min(lefts) + 100:
+            best_idx = i
+            break
+    s, e = runs[best_idx]
+    return int(hx0 + s), int(hx0 + e)
+
 
 
 def forced_card_bboxes(img, band_tops):
