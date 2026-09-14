@@ -202,30 +202,36 @@ async def websocket_endpoint(websocket: WebSocket):
 
     try:
         # Heartbeat interval (seconds) - send ping if no message received
-        HEARTBEAT_INTERVAL = 30
+        HEARTBEAT_INTERVAL = 5
         
         while True:
             try:
                 # Wait for message with timeout for heartbeat
                 message = await asyncio.wait_for(websocket.receive_text(), timeout=HEARTBEAT_INTERVAL)
                 logger.info("Received: %s", message)
+            except asyncio.TimeoutError:
+                # Heartbeat timeout - send protocol-level ping to keep connection alive
+                try:
+                    await websocket.ping()
+                except Exception:
+                    break
+                continue
 
             try:
                 data = json.loads(message)
-
             except json.JSONDecodeError:
                 logger.info(f"Invalid JSON received: {message!r}")
                 continue
 
-            except asyncio.TimeoutError:
-                # Heartbeat timeout - send ping to keep connection alive
-                try:
-                    await websocket.send_text(json.dumps({"type": "ping"}))
-                except Exception:
-                    # Connection lost
-                    break
+            if data["type"] == "ping":
+                logger.info("ping received from client, sending pong")
+                await manager.send_to_player(websocket,
+                    json.dumps({
+                        "type": "pong",
+                    })
+                )
                 continue
-            
+
             # This is only for Players.
             if data["type"] == "join":
                 game_id = data.get("game_id")
@@ -785,8 +791,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 await notify_waiting_room(game)
 
             elif data["type"] == "ping":
-                logger.debug("ping: reply with pong")
-                await manager.send_to_player( websocket,
+                logger.info("ping received from client, sending pong")
+                await manager.send_to_player(websocket,
                     json.dumps({
                         "type": "pong",
                     })
