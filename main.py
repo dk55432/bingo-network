@@ -201,16 +201,29 @@ async def websocket_endpoint(websocket: WebSocket):
     current_game_id = None
 
     try:
+        # Heartbeat interval (seconds) - send ping if no message received
+        HEARTBEAT_INTERVAL = 30
+        
         while True:
-
-            message = await websocket.receive_text()
-            logger.info("Received: %s", message)
+            try:
+                # Wait for message with timeout for heartbeat
+                message = await asyncio.wait_for(websocket.receive_text(), timeout=HEARTBEAT_INTERVAL)
+                logger.info("Received: %s", message)
 
             try:
                 data = json.loads(message)
 
             except json.JSONDecodeError:
                 logger.info(f"Invalid JSON received: {message!r}")
+                continue
+
+            except asyncio.TimeoutError:
+                # Heartbeat timeout - send ping to keep connection alive
+                try:
+                    await websocket.send_text(json.dumps({"type": "ping"}))
+                except Exception:
+                    # Connection lost
+                    break
                 continue
             
             # This is only for Players.
