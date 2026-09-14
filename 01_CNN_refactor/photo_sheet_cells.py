@@ -674,13 +674,14 @@ def _sheet_to_cells_with_boxes(
 # When cards are not x-aligned, the header boxes may have different
     # widths (e.g. one card's header detection includes table to the right).
     # The LEFT edge of the header is typically at the true card paper edge,
-    # while the right edge may extend onto the table.  Use the LEFT edge of
-    # each header as the card's left edge, with a fixed TARGET_CARD_WIDTH.
+    # while the right edge may extend onto the table.  However, individual
+    # header detections can have outlier left edges (shadows, reflections).
+    # Use the MEDIAN left edge of all headers as the consistent left edge
+    # for all cards, with a fixed TARGET_CARD_WIDTH.
     TARGET_CARD_WIDTH = 475
-    card_exts = []
-    for i, (hx0, y0, hx1, y1) in enumerate(boxes):
-        # Left edge of header = left edge of card paper
-        card_exts.append((hx0, hx0 + TARGET_CARD_WIDTH))
+    left_edges = [b[0] for b in boxes]
+    median_left = int(np.median(left_edges))
+    card_exts = [(median_left, median_left + TARGET_CARD_WIDTH) for _ in boxes]
 
     # For aligned sheets, still use shared frame extent (already computed)
     # but for unaligned, use normalized per-card extents above.
