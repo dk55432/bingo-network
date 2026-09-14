@@ -812,10 +812,18 @@ def _sheet_to_cells_with_boxes(
             # Span check: compare hom span to FALLBACK lattice span (cb
             # before hom adoption).  A correct homography projects the
             # full template grid; a mismatched one often projects only a
-            # subset.
+            # subset.  But if the fallback span is unreasonably large
+            # (>600px, likely the shared sheet extent rather than per-card),
+            # the fallback is unreliable and we should be lenient with hom.
             fallback_span = cb[-1] - cb[0]
             hom_span = hc[-1] - hc[0]
-            if hom_span < 0.7 * fallback_span:
+            # Expected single-card span ~5 * 95 = 475px
+            if fallback_span > 600:
+                # Fallback is likely the shared extent; use lenient threshold
+                threshold = 0.5
+            else:
+                threshold = 0.7
+            if hom_span < threshold * fallback_span:
                 use_hom = False
                 # Fall through to keep cb
 
