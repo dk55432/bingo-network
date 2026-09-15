@@ -34,19 +34,20 @@ hard-of-hearing, or low-vision can follow the game on their own terms.
   semantics, color-blind-safe card marking, audible chimes and vibration on new
   calls, "N numbers left per card" readout
 - **No accounts, no database setup** — self-host on any always-on box (tested on
-  a Raspberry Pi / Orange Pi) and hand out a QR code
+  a Raspberry Pi / Orange Pi and macOS) and hand out a QR code
 
 ## Quick start
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt        # core app
-pip install -r requirements-cnn.txt    # optional: CNN card reader
-uvicorn main:app --host 0.0.0.0 --port 8000
+pip install -r requirements.txt -r requirements-cnn.txt   # core app + CNN reader
+READER=cnn uvicorn main:app --reload --host 0.0.0.0
 ```
 
-The default reader uses Tesseract, which must also be installed:
+`READER=cnn` selects the recommended CNN scanner (see *Choosing the card
+reader* below). If you skip it, the app falls back to the legacy single-card
+Tesseract path — which also needs the `tesseract` binary installed:
 
 ```bash
 # Debian/Ubuntu (incl. the Orange Pi/Raspberry Pi)
