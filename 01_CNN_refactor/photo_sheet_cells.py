@@ -141,61 +141,10 @@ def teal_card_bboxes(img):
 
         boxes.append((x0, y0, x1, y1))
     boxes = sorted(boxes, key=lambda b: b[1])
-    # Merge header boxes that are the SAME card detected multiple times
-    # (same x-range, vertically close or overlapping y-ranges).
-    # But keep separate cards that have different horizontal positions.
-    merged_boxes = []
-    for box in boxes:
-        if not merged_boxes:
-            merged_boxes.append(list(box))
-        else:
-            last = merged_boxes[-1]
-            # Check if boxes have similar x-range (same horizontal position)
-            x_overlap = (box[0] < last[2]) and (box[2] > last[0])
-            # Check if boxes overlap in y OR are vertically close
-            y_overlap = (box[1] < last[3]) and (box[3] > last[1])
-            y_gap = box[1] - last[3]  # gap between last box bottom and this box top
-            # Check if two boxes are likely the SAME card's header detected twice:
-            # high x-overlap (>90%) AND significant y-overlap (>50% of shorter box)
-            x_overlap_frac = min(box[2], last[2]) - max(box[0], last[0])
-            x_union = max(box[2], last[2]) - min(box[0], last[0])
-            x_overlap_frac = x_overlap_frac / x_union if x_union > 0 else 0
-            
-            y_overlap_len = min(box[3], last[3]) - max(box[1], last[1])
-            shorter_height = min(box[3] - box[1], last[3] - last[1])
-            y_overlap_frac = y_overlap_len / shorter_height if shorter_height > 0 else 0
-            
-            # Merge if same x-range and (overlap in y OR small gap)
-            # BUT don't merge if they're likely the same card's header detected twice
-            # (high x-overlap AND significant y-overlap)
-            same_card_header = (x_overlap_frac > 0.9) and (y_overlap_frac > 0.5)
-            
-            if x_overlap and (y_overlap or (y_gap >= 0 and y_gap <= 50)) and not same_card_header:
-                last[3] = max(last[3], box[3])
-                last[0] = min(last[0], box[0])
-                last[2] = max(last[2], box[2])
-            else:
-                merged_boxes.append(list(box))
-    boxes = [tuple(b) for b in merged_boxes]
-    
     if len(boxes) == 1 and gray.shape[0] >= 1500:
         extra = _faint_header_fallback(teal, boxes[0])
         if extra:
             boxes = sorted(extra, key=lambda b: b[1])
-
-    # Drop boxes that are fully contained in another (the same header band
-    # detected twice with slightly different extents, e.g. fallback peaks
-    # on a wide warm-tinted top region).  Keeping both makes the per-card
-    # loop compute a negative-height band for the intervening card and
-    # skip valid cards.
-    dedup = []
-    for b in sorted(boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]),
-                    reverse=True):
-        if any(b[0] >= d[0] - 3 and b[1] >= d[1] - 3 and
-               b[2] <= d[2] + 3 and b[3] <= d[3] + 3 for d in dedup):
-            continue
-        dedup.append(b)
-    boxes = sorted(dedup, key=lambda b: b[1])
     return boxes
 
 
@@ -745,11 +694,9 @@ def _sheet_to_cells_with_boxes(
         bottom = boxes[i + 1][1] if i + 1 < len(boxes) else H
         if i + 1 == len(boxes):
             bottom = _card_y_extent(gray, top, bottom)
-        # Minimum card body height (in pixels) to avoid processing spurious header bands
-        MIN_CARD_HEIGHT = 200
-        if bottom - top < MIN_CARD_HEIGHT or grid_x1 - grid_x0 < 60:
+        if bottom - top < 60 or grid_x1 - grid_x0 < 60:
             if verbose:
-                print(f"card{i + 1}: region too thin ({bottom - top}x{grid_x1 - grid_x0}), skipping")
+                print(f"card{i + 1}: region too thin ({bottom - top}x{grid_x1 - grid_x0})")
             continue
         
         # Use header box for vertical position (y), but frame extent for horizontal (x)

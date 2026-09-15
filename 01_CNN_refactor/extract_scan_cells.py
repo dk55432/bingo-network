@@ -138,27 +138,18 @@ def _header_hue_spec(img):
     # Similar to teal's relaxed attempts, but for all non-teal families.
     relaxed_candidates = []
     for idx, ((hl, hh), s_min, v_min, rowfrac) in enumerate(_BAND_FAMILIES[1:]):
-        best_for_family = None
-        best_n_bands = 0
-        best_spec = None
+        # Try progressively relaxed thresholds for low-light conditions
         for s_min, v_min in [(60, 80), (40, 60), (30, 40), (20, 30), (15, 20)]:
             relaxed_mask = _hue_in(h, hl, hh) & (s > s_min) & (v > v_min)
             relaxed_bands = _mask_bands(relaxed_mask, rowfrac)
-            filtered_bands = [b for b in relaxed_bands if b[0] > 0]
-            score, ok = _sheet_structure(filtered_bands, img.shape[0])
-            n_bands = len(filtered_bands)
-            # Accept if structurally valid OR if we have 2-3 bands (like teal's relaxed logic)
-            # This handles gray sheets where headers are faint and bands may not be perfectly even
-            if ok or (not ok and n_bands >= 2):
-                if n_bands > best_n_bands:
-                    best_n_bands = n_bands
-                    best_for_family = (hl, hh, s_min, v_min, rowfrac)
-        if best_for_family:
-            relaxed_candidates.append(best_for_family)
+            score, ok = _sheet_structure(relaxed_bands, img.shape[0])
+            n_bands = len(relaxed_bands)
+            # Only accept if structurally valid (ok=True) to avoid false positives
+            if ok:
+                relaxed_candidates.append((score, -idx, (hl, hh, s_min, v_min, rowfrac)))
+                break  # Use the first working relaxed threshold for this family
     if relaxed_candidates:
-        # Prefer families that detected more cards (more bands)
-        relaxed_candidates.sort(key=lambda x: x[0], reverse=True)
-        return relaxed_candidates[0]  # Return the (hl, hh, s_min, v_min, rowfrac) tuple
+        return max(relaxed_candidates)[2]
 
     # Nothing clearly sheet-like yet.  The raw-score and dominant-hue
     # fallbacks exist so unseen print colors still get a chance, but they
