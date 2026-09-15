@@ -9,6 +9,12 @@ outputs/
 
 # Runtime state (SQLite persistence); per-deployment, not committed
 data/
+01_CNN_refactor/phone_sheets4/
+sample_bingo_cards/
+bad_images/
+01_CNN_refactor/bad_images
+scan_card_numbers.txt.bak*
+NOTES.md
 01_CNN_refactor/phone_sheets/
 01_CNN_refactor/phone_sheets2/
 01_CNN_refactor/phone_sheets3/
