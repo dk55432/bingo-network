@@ -108,8 +108,6 @@ logger.info(f"Loaded {len(WINNING_PATTERNS)} winning pattern(s): {list(WINNING_P
 async def join_page(request: Request):
     return templates.TemplateResponse(
         request=request,
-        # name="player.html"
-        # name="join.html"
         name="landing.html"
     )
 
@@ -155,15 +153,6 @@ async def scan_page(request: Request):
     resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     return resp
 
-# DAVE: I'm going to do this over the websocket instead of a REST endpoint.
-#       See "create_game" below.   
-# @app.post("/create_game")  # or wherever "host starts a game" currently happens
-# async def create_game():
-#     game_id = str(uuid.uuid4())
-#     game_manager.games[game_id] = Game()  # your existing Game() constructor, unchanged
-#     return {"game_id": game_id}
-    
-    
 def disconnect_player(websocket, game):
     if websocket in manager.active_connections:
         manager.disconnect(websocket)
@@ -296,13 +285,13 @@ async def websocket_endpoint(websocket: WebSocket):
                     })
                 )
     
-                # Debug
                 logger.debug("Post-join: Players:")
                 for player in game.players.values():
-                    print(
+                    logger.debug(
+                        "%s connected=%s websocket=%s",
                         player.display_name,
                         player.connected,
-                        player.websocket is not None
+                        player.websocket is not None,
                     )
                     
             # A message from Host
@@ -379,29 +368,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 )
                 
                 winners = result["winners"]
-                updated_cards = result["updated_cards"]
-                
-                logger.debug("UPDATED CARDS:")
-                for update in updated_cards:
-                    logger.debug(update)
-                    
-                for update in updated_cards:
-                    player = game.players[update["player_id"]]
-                    if player is None:
-                        await manager.send_to_player(
-                            websocket,
-                            json.dumps({
-                                "type": "reconnect_failed"
-                            })
-                        )
-                        continue
-                    # await manager.send_to_player( player.websocket,
-                    #     json.dumps({
-                    #         "type": "cards",
-                    #         "cards": cards_to_dict(player.cards)
-                    #     })
-                    # )            
-        
+
                 logger.debug("WINNERS: %s", winners)
 
                 await manager.broadcast_to_game(
@@ -465,8 +432,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     })
                 )
 
-                # DAVE: I keep getting cards[0] error, cards is null
-                # Clean this issue up when refactoring to support multi-cards.
+                # player.cards may be empty (e.g. after a server restart), so send
+                # None rather than indexing [0] — the client clears its board.
                 if len(player.cards) == 0:
                     await manager.send_to_player( websocket,
                         json.dumps({
@@ -481,13 +448,13 @@ async def websocket_endpoint(websocket: WebSocket):
                             "cards": cards_to_dict(player.cards)
                         })
                     ) 
-                # Debug
                 logger.debug("Post-reconnect: Players:")
                 for player in game.players.values():
-                    print(
+                    logger.debug(
+                        "%s connected=%s websocket=%s",
                         player.display_name,
                         player.connected,
-                        player.websocket is not None
+                        player.websocket is not None,
                     )
 
             elif data["type"] == "leave":
@@ -635,7 +602,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     )
                     continue
                 logger.debug("disposeCards for player "+ str(player))
-                # DAVE: null player when server restarts but browser doesn't.
+                # player can be None if the server restarted while the
+                # browser stayed open — dispose nothing and still ack.
                 if player is not None:
                     player.dispose_cards()
                 logger.debug("after disposeCards for player "+ str(player))
@@ -790,14 +758,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 )
                 await notify_waiting_room(game)
 
-            elif data["type"] == "ping":
-                logger.info("ping received from client, sending pong")
-                await manager.send_to_player(websocket,
-                    json.dumps({
-                        "type": "pong",
-                    })
-                )     
-                
             elif data["type"] == "set_winning_pattern":
                 game = game_manager.get_game(current_game_id)
                 if game is None:
@@ -878,13 +838,13 @@ async def websocket_endpoint(websocket: WebSocket):
             disconnect_player(websocket, game)
 
             logger.info(f"Clients connected: {len(manager.active_connections)}")
-            # Debug
             logger.debug("Post-disconnect: Players:")
             for player in game.players.values():
-                print(
+                logger.debug(
+                    "%s connected=%s websocket=%s",
                     player.display_name,
                     player.connected,
-                    player.websocket is not None
+                    player.websocket is not None,
                 )
         else:
             # A host connection that never reached host_reconnect/create_game,

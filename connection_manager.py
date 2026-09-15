@@ -3,7 +3,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
-# logging.basicConfig(level=logging.DEBUG)
 
 class ConnectionManager:
 
@@ -22,11 +21,8 @@ class ConnectionManager:
 
     async def broadcast(self, message: str):
         dead_connections = []
-        # Debug
-        print("Broadcasting to:")
-        for i, ws in enumerate(self.active_connections):
-            print(i, ws)
-            
+        logger.debug("Broadcasting to %d connection(s)", len(self.active_connections))
+
         for connection in self.active_connections:
             try:
                 await connection.send_text(message)
