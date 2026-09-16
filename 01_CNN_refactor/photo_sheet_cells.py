@@ -81,7 +81,9 @@ def teal_card_bboxes(img):
     color is auto-detected, see _header_hue_spec)."""
     spec = _header_hue_spec(img)
     if spec is None:
-        return []
+        gray_boxes = _gray_strip_bboxes(
+            cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
+        return gray_boxes if gray_boxes else []
     hl, hh, s_min, v_min, rowfrac = spec
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     h = hsv[:, :, 0].astype(int)
@@ -145,7 +147,59 @@ def teal_card_bboxes(img):
         extra = _faint_header_fallback(teal, boxes[0])
         if extra:
             boxes = sorted(extra, key=lambda b: b[1])
+    if len(boxes) < 3:
+        gray_boxes = _gray_strip_bboxes(gray)
+        if gray_boxes:
+            boxes = gray_boxes
     return boxes
+
+
+def _gray_strip_bboxes(gray):
+    """Recover the 3 card-band boxes on a dim, low-saturation sheet (e.g. a
+    gray card in bar lighting) whose printed header bars carry no usable
+    color.  The bars' ink is dense enough that, for many contiguous rows,
+    over half the central sheet width is darker than the paper — while the
+    number-grid rows dip back to near-paper brightness between digits.  So
+    the sustained darker row-runs isolate exactly the header bars; grid
+    content lines are thin/single-row and get filtered out by the minimum
+    band height.  Only a full 3-bar strip with even spacing is returned."""
+    H, W = gray.shape
+    x0, x1 = int(0.24 * W), int(0.76 * W)
+    sig = (gray[:, x0:x1] < 160).mean(axis=1).astype(np.float64)
+    sig = np.convolve(sig, np.ones(3) / 3, mode="same")
+    mask = sig >= 0.45
+    bands = []
+    cur = None
+    for y in range(H):
+        if mask[y]:
+            if cur is None:
+                cur = [y, y]
+            else:
+                cur[1] = y
+        else:
+            if cur is not None:
+                if 40 <= cur[1] - cur[0] <= 120:
+                    bands.append((cur[0], cur[1]))
+                cur = None
+    if cur is not None and 40 <= cur[1] - cur[0] <= 120:
+        bands.append((cur[0], cur[1]))
+    if len(bands) != 3:
+        return None
+    tops = [b[0] for b in bands]
+    pitches = [tops[i + 1] - tops[i] for i in range(2)]
+    if max(pitches) - min(pitches) > 0.28 * max(pitches):
+        return None
+    if pitches[0] < 0.22 * H or pitches[0] > 0.5 * H:
+        return None
+    boxes = []
+    cx0, cx1 = int(0.20 * W), int(0.80 * W)
+    for by0, by1 in bands:
+        colfrac = (gray[by0:by1 + 1, cx0:cx1] < 170).mean(axis=0)
+        xs = np.where(colfrac > 0.30)[0]
+        if xs.size == 0:
+            xs = np.array([x0])
+        boxes.append((cx0 + int(xs[0]), by0, cx0 + int(xs[-1]), by1))
+    return sorted(boxes, key=lambda b: b[1])
 
 
 def _faint_header_fallback(teal, first_box):
