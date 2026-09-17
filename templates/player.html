@@ -156,7 +156,8 @@ function connect() {
     );
 
     socket.onopen = () => {
-        reconnectAttempts = 0;
+        // Backoff persists across attempts; reset only once the server
+        // validates this connection (reconnected) in handleSocketMessage.
         console.log("Player socket connected");
         document.getElementById("status").textContent = "Connected";
         requestCatchUp(socket);
@@ -336,6 +337,7 @@ function handleSocketMessage(event) {
     const data = JSON.parse(event.data);
     if (data.type === "reconnected") {
         console.log("Reconnect successful");
+        reconnectAttempts = 0;
     }
     else if (data.type === "reconnect_failed") {
         console.log("reconnect_failed, redirecting to login page.")

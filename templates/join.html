@@ -57,7 +57,8 @@ WebSocket Status:
                 );
 
                 socket.onopen = () => {
-                    reconnectAttempts = 0;
+                    // Backoff persists across attempts; reset only on a
+                    // validated ack (joined / waiting_for_next_game) below.
                     console.log("WebSocket connected");
                     document.getElementById("status").textContent = "Connected";
 
@@ -145,11 +146,13 @@ WebSocket Status:
                 const data = JSON.parse(event.data);
 
                 if (data.type === "joined") {
+                    reconnectAttempts = 0;
                     localStorage.setItem("player_id", data.player_id);
                     localStorage.removeItem("waiting_for_game_id");
                     window.location.href = "/player";
                 }
                 else if (data.type === "waiting_for_next_game") {
+                    reconnectAttempts = 0;
                     isWaiting = true;
                     localStorage.setItem("waiting_for_game_id", gameId);
                     document.getElementById("joinButton").disabled = true;

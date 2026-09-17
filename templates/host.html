@@ -240,7 +240,9 @@ function connect() {
     );
 
     socket.onopen = () => {
-        reconnectAttempts = 0;
+        // reconnectAttempts deliberately NOT reset on open: exponential
+        // backoff must persist across attempts and only clears once the
+        // server validates this connection (host_reconnected/game_created).
         console.log("Host socket connected");
 
         const game_id = localStorage.getItem("game_id");
@@ -334,11 +336,13 @@ function handleHostSocketMessage(event) {
     }
     else if (data.type === "host_reconnected") {
         console.log("Host reconnect successful");
+        reconnectAttempts = 0;
         showJoinLink(localStorage.getItem("game_id"));
         populatePatternSelect(data.available_patterns);
     }
     else if (data.type === "game_created") {
         console.log("New game created:", data.game_id);
+        reconnectAttempts = 0;
         localStorage.setItem("game_id", data.game_id);
         showJoinLink(data.game_id);
         populatePatternSelect(data.available_patterns);

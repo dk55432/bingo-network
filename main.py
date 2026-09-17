@@ -190,8 +190,12 @@ async def websocket_endpoint(websocket: WebSocket):
     current_game_id = None
 
     try:
-        # Heartbeat interval (seconds) - send ping if no message received
-        HEARTBEAT_INTERVAL = 5
+        # Client drives liveness with its own app-level {"type":"ping"}
+        # every 10s (server replies pong), so the idle timeout must exceed
+        # that cadence. There is no protocol-level WebSocket.ping() in
+        # starlette — calling one here raised AttributeError, broke the
+        # loop, and leaked every reconnecting socket from active_connections.
+        HEARTBEAT_INTERVAL = 15
         
         while True:
             try:
@@ -199,11 +203,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 message = await asyncio.wait_for(websocket.receive_text(), timeout=HEARTBEAT_INTERVAL)
                 logger.info("Received: %s", message)
             except asyncio.TimeoutError:
-                # Heartbeat timeout - send protocol-level ping to keep connection alive
-                try:
-                    await websocket.ping()
-                except Exception:
-                    break
+                # Truly idle for HEARTBEAT_INTERVAL — a healthy client beats
+                # this with its 10s app-level ping. If the link actually
+                # died, the next receive_text() raises WebSocketDisconnect
+                # and the finally block below unregisters the socket.
                 continue
 
             try:
@@ -852,6 +855,18 @@ async def websocket_endpoint(websocket: WebSocket):
             if websocket in manager.active_connections:
                 manager.disconnect(websocket)
             logger.info(f"Clients connected: {len(manager.active_connections)}")
+
+    finally:
+        # Every exit path (WebSocketDisconnect, broken pipe, or an unexpected
+        # exception during receive/send) must unregister this socket, or the
+        # client count ratchets up one per reconnect with no decrement ever.
+        # This runs for ALL exits — not just WebSocketDisconnect — and it is
+        # idempotent (disconnect_player/disconnect no-op once already removed).
+        game = game_manager.get_game(current_game_id)
+        if game is not None:
+            disconnect_player(websocket, game)
+        elif websocket in manager.active_connections:
+            manager.disconnect(websocket)
 
 async def notify_waiting_room(game):
     """Let people queued in the waiting room see status changes (e.g. the
