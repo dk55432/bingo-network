@@ -631,6 +631,8 @@
       assistBtn.textContent = "This may be a 3-card sheet in low light — tap the 3 card tops to get all 3 →";
       statusEl.textContent = `Found only ${cardWord}. As in low light the headers can wash out, ` +
         `this may be a 3-card sheet read as one. Review below, or tap the 3 card tops to scan all 3.`;
+      // Auto-open assist panel so user can immediately tap the 3 headers
+      if (lastScanId) openAssist(lastScanId);
     } else {
       assistBtn.textContent = "Misaligned or wrong cards? Tap the 3 card tops instead";
       statusEl.textContent = anyNeedsReview

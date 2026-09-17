@@ -347,6 +347,45 @@ def read_sheet_bytes(model, data, forced_bands=None):
         if len(norm_detected) > len(norm_boxes):
             norm_boxes = norm_detected
 
+    # Last-resort fallback for washed-out gray sheets: when color-based
+    # header detection finds fewer than a full sheet, infer card tops from
+    # the printed grid lines (header-color-independent).  Only overrides
+    # when it finds at least two COMPLETE cards (not truncated).
+    # If the fallback detects truncation, return a retake error directly
+    # to force assisted scan (don't use bogus color boxes).
+    pre_row_bounds = None
+    if norm_boxes is None or len(norm_boxes) < 3:
+        from photo_sheet_cells import grid_line_card_bboxes
+        grid_boxes, grid_row_bounds, truncated = grid_line_card_bboxes(orig)
+        if len(grid_boxes) >= 2 and not truncated:
+            norm_boxes = _scale_boxes(grid_boxes, orig.shape, norm.shape)
+            # Scale row bounds to normalized coordinates
+            h_scale = norm.shape[0] / orig.shape[0]
+            pre_row_bounds = [[int(y * h_scale) for y in rb]
+                              for rb in grid_row_bounds]
+        elif truncated:
+            # Fallback found cards but they're truncated — return retake
+            # error to force assisted scan (don't use bogus color boxes).
+            hue = _teal_hue_stats(norm)
+            ts = int(time.time())
+            dbg = Path("/tmp/cnn_reader_debug")
+            dbg.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(dbg / f"in_{ts}.png"), norm)
+            overlay = norm.copy()
+            cv2.imwrite(str(dbg / f"overlay_{ts}.png"), overlay)
+            return {"cards": [], "error": (
+                "photo is truncated (missing top rows of lower cards) — "
+                "retake with the full sheet in frame, or tap the three "
+                "header bars for an assisted scan"), "debug": {
+                "dump_in": str(dbg / f"in_{ts}.png"),
+                "dump_overlay": str(dbg / f"overlay_{ts}.png"),
+                "ts": str(ts),
+                "dump_orig": str(dbg / f"orig_{ts}.jpg"),
+                "hue_med": round(float(hue[0])),
+                "hue_pct20_80": [round(float(x), 1) for x in hue[1]],
+                "sat_med": round(float(hue[2])),
+                "val_med": round(float(hue[3]))}}
+
     # Keep the RAW phone bytes next to the normalized dump so a misread can
     # be reproduced exactly: normalization + warp destroy the original color
     # statistics that the first (teal) detection stage relies on.  Uses the
@@ -357,7 +396,8 @@ def read_sheet_bytes(model, data, forced_bands=None):
     dbg.mkdir(parents=True, exist_ok=True)
     (dbg / f"orig_{ts}.jpg").write_bytes(data)
 
-    return _read_sheet(model, norm, forced_bands, pre_boxes=norm_boxes, ts=ts)
+    return _read_sheet(model, norm, forced_bands, pre_boxes=norm_boxes,
+                        pre_row_bounds=pre_row_bounds, ts=ts)
 
 
 def read_sheet_path(model, path):
@@ -408,7 +448,8 @@ def _structure_ok(bboxes, band_tops=None):
     return True, ""
 
 
-def _read_sheet(model, sheet_bgr, forced_bands=None, pre_boxes=None, ts=None):
+def _read_sheet(model, sheet_bgr, forced_bands=None, pre_boxes=None,
+                pre_row_bounds=None, ts=None):
     """sheet_bgr (normalized full-sheet BGR) -> /scan-card payload.
 
     forced_bands: when the auto header-color detection fails (washed-out
@@ -434,7 +475,8 @@ def _read_sheet(model, sheet_bgr, forced_bands=None, pre_boxes=None, ts=None):
         # Use pre-detected boxes (from original image, scaled to normalized)
         from photo_sheet_cells import _sheet_to_cells_with_boxes
         items = _sheet_to_cells_with_boxes(
-            sheet_bgr, pre_boxes, return_geometry=True, trace=trace)
+            sheet_bgr, pre_boxes, return_geometry=True, trace=trace,
+            pre_row_bounds=pre_row_bounds, trust_box_x=True)
         by, boxes = {}, {}
         for cid, r, c, cell, box in items:
             by.setdefault(cid, {})[(r, c)] = cell
