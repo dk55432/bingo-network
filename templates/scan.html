@@ -926,6 +926,18 @@
 
   const cancelReviewBtn = document.getElementById("cancelReviewBtn");
   cancelReviewBtn.addEventListener("click", () => {
+    // This scan was reviewed and rejected — tell the server so its saved
+    // crops are purged from /tmp/phone_learning_pending (they were never
+    // accepted, so they must never feed retraining). Best-effort: the
+    // discard still resets the UI even if the purge call fails.
+    const rejectedScanId = lastScanId;
+    if (rejectedScanId) {
+      fetch(`${API_BASE}/scan/reject`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scan_id: rejectedScanId }),
+      }).catch(() => {});
+    }
     lastScanId = null;
     scanError = null;
     hideBlurWarning();

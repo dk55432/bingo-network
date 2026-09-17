@@ -346,7 +346,18 @@ def read_sheet_bytes(model, data, forced_bands=None):
         norm_detected = teal_card_bboxes(norm)
         if len(norm_detected) > len(norm_boxes):
             norm_boxes = norm_detected
-    return _read_sheet(model, norm, forced_bands, pre_boxes=norm_boxes)
+
+    # Keep the RAW phone bytes next to the normalized dump so a misread can
+    # be reproduced exactly: normalization + warp destroy the original color
+    # statistics that the first (teal) detection stage relies on.  Uses the
+    # same 1s-precision ts as _read_sheet's in_/overlay_ dumps so the files
+    # line up for post-mortems.
+    ts = int(time.time())
+    dbg = Path("/tmp/cnn_reader_debug")
+    dbg.mkdir(parents=True, exist_ok=True)
+    (dbg / f"orig_{ts}.jpg").write_bytes(data)
+
+    return _read_sheet(model, norm, forced_bands, pre_boxes=norm_boxes, ts=ts)
 
 
 def read_sheet_path(model, path):
@@ -397,7 +408,7 @@ def _structure_ok(bboxes, band_tops=None):
     return True, ""
 
 
-def _read_sheet(model, sheet_bgr, forced_bands=None, pre_boxes=None):
+def _read_sheet(model, sheet_bgr, forced_bands=None, pre_boxes=None, ts=None):
     """sheet_bgr (normalized full-sheet BGR) -> /scan-card payload.
 
     forced_bands: when the auto header-color detection fails (washed-out
@@ -443,7 +454,8 @@ def _read_sheet(model, sheet_bgr, forced_bands=None, pre_boxes=None):
         print(f"[geo] clusters={trace.get('clusters')} "
               f"lattice={trace.get('lattice')} "
               f"hom_all={trace.get('hom_all')}", flush=True)
-    ts = int(time.time())
+    if ts is None:
+        ts = int(time.time())
     dbg = Path("/tmp/cnn_reader_debug")
     dbg.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(dbg / f"in_{ts}.png"), sheet_bgr)
@@ -466,6 +478,7 @@ def _read_sheet(model, sheet_bgr, forced_bands=None, pre_boxes=None):
             "dump_in": str(dbg / f"in_{ts}.png"),
             "dump_overlay": str(dbg / f"overlay_{ts}.png"),
             "ts": str(ts),
+            "dump_orig": str(dbg / f"orig_{ts}.jpg"),
             "bands": sorted({v[1] for cell_boxes in bboxes.values()
                              for v in cell_boxes.values()}) if bboxes else [],
             "hue_med": round(float(hue[0])),
@@ -497,6 +510,7 @@ def _read_sheet(model, sheet_bgr, forced_bands=None, pre_boxes=None):
             "dump_in": str(dbg / f"in_{ts}.png"),
             "dump_overlay": str(dbg / f"overlay_{ts}.png"),
             "ts": str(ts),
+            "dump_orig": str(dbg / f"orig_{ts}.jpg"),
             "bands": sorted({v[1] for cell_boxes in bboxes.values()
                              for v in cell_boxes.values()}) if bboxes else []}}
 
@@ -528,6 +542,7 @@ def _read_sheet(model, sheet_bgr, forced_bands=None, pre_boxes=None):
         "dump_in": str(dbg / f"in_{ts}.png"),
         "dump_overlay": str(dbg / f"overlay_{ts}.png"),
         "ts": str(ts),
+        "dump_orig": str(dbg / f"orig_{ts}.jpg"),
         "partial_sheet": len(by_card) < 3,
         "warped": bool(warped),
         "blur": round(blur, 1),

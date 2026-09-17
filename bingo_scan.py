@@ -451,3 +451,33 @@ async def confirm_cards(payload: ConfirmCardsRequest, request: Request):
             pass  # don't fail the scan just because the push failed
 
     return [c.to_dict() for c in saved_cards]
+
+
+class RejectScanRequest(BaseModel):
+    scan_id: Optional[str] = None
+
+
+@router.post("/scan/reject")
+async def reject_scan(payload: RejectScanRequest):
+    """User discarded a scan review (Cancel — discard this scan in scan.html).
+    Purges that scan's saved crops and debug dumps so an un-accepted read
+    never lingers in phone_learning_pending and can't pollute retraining.
+    Accepted scans never reach here: /cards copies them into learning_cells
+    and _save_learning_cells already deletes the pending dir itself. The
+    rest (scans whose reviews were abandoned) can be purged in bulk with
+    01_CNN_refactor/clean_scan_artifacts.py."""
+    if not payload.scan_id:
+        return {"deleted": False}
+    safe = "".join(ch for ch in str(payload.scan_id) if ch.isdigit())
+    if not safe:
+        return {"deleted": False}
+    pending = Path("/tmp/phone_learning_pending") / safe
+    deleted = False
+    if pending.is_dir():
+        shutil.rmtree(pending, ignore_errors=True)
+        logger.info("learning: discarded scan %s (user rejected)", safe)
+        deleted = True
+    dbg = Path("/tmp/cnn_reader_debug")
+    for name in (f"in_{safe}.png", f"overlay_{safe}.png", f"orig_{safe}.jpg"):
+        (dbg / name).unlink(missing_ok=True)
+    return {"deleted": deleted}
