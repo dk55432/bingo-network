@@ -436,6 +436,10 @@
 
   const scannedThisSession = [];
   let assistTaps = [];
+  // Full height (pixels) of the served normalized scan photo, from the
+  // reader's debug payload (debug.in_h).  The assist image is downscaled
+  // for the phone, so taps must be scaled back up to this real resolution.
+  let assistInH = 0;
 
   // Corner picker state — positions stored as percentages (0-100) of the
   // displayed image box, which is what the SVG's viewBox is in too. That
@@ -603,8 +607,10 @@
       const dbg = scanError?.debug;
       if (dbg?.ts) {
         statusEl.textContent = `Error: ${e.message} — tap the 3 card tops to scan it manually:`;
+        assistInH = dbg.in_h || 0;
         openAssist(dbg.ts);
       } else {
+
         statusEl.textContent = `Error: ${e.message}`;
         uploadBox.style.display = "block";
       }
@@ -613,6 +619,7 @@
 
   function handleScanSuccess(data) {
     lastScanId = data.scan_id ?? null;
+    assistInH = data.debug?.in_h || 0;
     hideBlurWarning();
     if (data.debug?.blurry) {
       showBlurWarning("This photo is blurry — some numbers may be misread. Retake for a more reliable read, or carefully check every number below before saving.");

@@ -428,6 +428,83 @@ def _snap(bounds, dark, lo, hi, radius):
     return out
 
 
+def _row_anchor_above(dip, top, bottom, hint_pitch):
+    """Find the card's true first printed grid line ABOVE the forced box
+    bottom (the assisted-scan tap can land anywhere in the header band, so
+    box.y1 + 2 — the usual row-0 anchor — can sit BELOW the real top line,
+    causing every row to drift onto interior digit strokes).  Returns the
+    strongest grid-dip boundary at most ~1.5 pitches above `top` when it is
+    convincingly strong, else None (keep the box-bottom anchor)."""
+    w0 = max(0, top - int(1.5 * hint_pitch))
+    w1 = max(w0, min(bottom - 2, top + int(0.25 * hint_pitch)))
+    regmax = float(np.max(dip[max(0, top):bottom])) if bottom > top else 0.0
+    if regmax <= 0:
+        return None
+    seg = dip[w0:w1 + 1]
+    if seg.size == 0:
+        return None
+    m = int(np.argmax(seg))
+    if seg[m] >= 0.4 * regmax:
+        return int(w0 + m)
+    return None
+
+
+def _last_card_contrast_lattice(gray, top, bottom, x0, x1, seed_pitch):
+    """Find the last card's true printed grid lattice from row-wise CONTRAST
+    (|row - local-avg|), which finds grid lines even when the sheet bottom is
+    dark/saturated where the dark-ink dip profile loses them.
+
+    The assisted-scan seed pitch is a median of the UPPER cards' pitches,
+    which under-estimates the bottom card (perspective grows the pitch down
+    the page).  We search a uniform 6-line lattice with pitch in
+    [0.75, 1.45]*seed, anchor at most `pitch` above `top`, and last line
+    within [bottom - 3pitch, bottom + pitch], scoring rows by their contrast
+    strength.  Returns up to 3 (rows, strength) candidates (strongest first)
+    or None.  Adoption is decided at the caller by decoding the candidates
+    (this helper can't see the model), so a spurious lattice (e.g. digit-row
+    bands on sheets whose last grid truly uses a small pitch) is harmless
+    there."""
+    H = gray.shape[0]
+    if x1 <= x0 or H == 0:
+        return None
+    w = gray[:, x0:x1 + 1].astype(np.float32)
+    avg = cv2.boxFilter(w, -1, (1, 13), normalize=True)
+    d = np.abs(w - avg).mean(axis=1)
+    res = []
+    for pitch in np.arange(max(50.0, 0.75 * seed_pitch),
+                           min(200.0, 1.45 * seed_pitch) + 0.01, 0.5):
+        lo_a = max(0, int(round(top - pitch)))
+        hi_a = min(H - 1, int(round(top + pitch)))
+        lo_l = max(0, int(round(bottom - 3.0 * pitch)))
+        hi_l = min(H - 1, int(round(bottom + pitch)))
+        for a in np.arange(lo_a, hi_a + 0.01, 1.0):
+            rows = a + pitch * np.arange(6)
+            if rows[-1] > hi_l or rows[-1] < lo_l:
+                continue
+            rr = np.clip(rows.astype(int), 0, H - 1)
+            s = float(d[rr].sum())
+            if len(res) < 6 or s > res[-1][0]:
+                res.append((s, rr.tolist(), float(pitch), float(a)))
+                res.sort(key=lambda t: -t[0])
+                del res[6:]
+    if not res:
+        return None
+    out = []
+    for strength, rows, pitch, anchor in res:
+        # Snap each line to the nearest local contrast maximum within 6px (the
+        # uniform lattice + strength sum can land a few px off a weak line).
+        sn = list(rows)
+        for k in range(6):
+            lo = max(0, rows[k] - 6)
+            hi = min(H - 1, rows[k] + 6)
+            seg = d[lo:hi + 1]
+            m = int(np.argmax(seg))
+            if d[lo + m] > d[rows[k]]:
+                sn[k] = lo + m
+        out.append((sn, strength))
+    return out
+
+
 def _card_y_extent(gray, top, hint_bottom):
     """Clip the card's bottom to the last bright (paper) row in the region,
     so the last card doesn't drag cells into the dark background. Row
@@ -922,6 +999,7 @@ def _sheet_to_cells_with_boxes(
     cells_out = []
     prev_pitch = None
     prev_pitch2 = None
+    seed_pitch = None
     for i, (hx0, y0, hx1, y1) in enumerate(boxes):
         top = y1 + 2
         bottom = boxes[i + 1][1] if i + 1 < len(boxes) else H
@@ -944,33 +1022,94 @@ def _sheet_to_cells_with_boxes(
             x0, x1 = card_exts[i]
 
         # Compute grid signature for _fix_row_lattice (needed even with pre_row_bounds)
-        grid_sig = _grid_dip(gray, x0, x1, top, bottom)
+        # Use wider strip for last card in forced path to better detect
+        # faint horizontal grid lines across full card width
+        strip_w = 48 if (i + 1 == len(boxes) and trust_box_x) else 12
+        sig_top = top
+        up_pitch = 0.0
+        if i + 1 == len(boxes) and trust_box_x:
+            # The tap can land deep in the header band, pushing box[3]+2
+            # BELOW the card's true first printed grid line.  Extend the dip
+            # region upward ~1.6 pitches so that line is inside the signal
+            # the row lattice can anchor on.
+            up_p = np.median([p for p in (prev_pitch, prev_pitch2)
+                              if p is not None]) if (prev_pitch is not None
+                              or prev_pitch2 is not None) else 70.0
+            up_pitch = float(up_p)
+            sig_top = max(0, top - int(1.6 * up_pitch))
+        grid_sig = _grid_dip(gray, x0, x1, sig_top, bottom, strip_w=strip_w)
 
 # ---- ROWS: proven dip + snap (or pre-detected grid lines) ----
         rb = None
         used_pre = False
         if pre_row_bounds is not None and i < len(pre_row_bounds):
-            rb = list(pre_row_bounds[i])
-            if len(rb) == 6:
+            card_bounds = pre_row_bounds[i]
+            if card_bounds is not None and len(card_bounds) == 6:
+                rb = list(card_bounds)
                 used_pre = True
             else:
                 rb = None
         if rb is None:
             if i + 1 == len(boxes):
+                # Last card: use robust pitch estimate and larger snap radius
                 if prev_pitch is not None and prev_pitch2 is not None:
-                    seed_pitch = prev_pitch * prev_pitch / max(1.0, prev_pitch2)
+                    # Use median of previous pitches instead of extrapolated growth
+                    # (extrapolation assumes cards grow down the page, but grid lines
+                    # often fade at the bottom, making detected pitch appear smaller)
+                    # Only apply this heuristic in forced path where grid lines fade
+                    if trust_box_x:
+                        seed_pitch = float(np.median([prev_pitch, prev_pitch2]))
+                    else:
+                        # Auto path: use extrapolated growth as before
+                        seed_pitch = prev_pitch * prev_pitch / max(1.0, prev_pitch2)
                     seed_pitch = max(50.0, min(140.0, seed_pitch))
                     rb = [top + round(seed_pitch * k) for k in range(6)]
+                    if trust_box_x:
+                        # Anchor the lattice on the card's true first printed
+                        # line when a strong one sits above the box bottom (see
+                        # _row_anchor_above).  When anchored, use the upper
+                        # pitch median + a tight snap; otherwise keep the
+                        # proven median pitch with a wide snap radius.
+                        anchor = _row_anchor_above(
+                            grid_sig, top, bottom, seed_pitch)
+                        if anchor is not None:
+                            rb = [anchor + round(seed_pitch * k)
+                                  for k in range(6)]
                 elif prev_pitch is not None:
                     rb = [top + round(prev_pitch * k) for k in range(6)]
                 else:
                     rb = [top + (bottom - top) * k // 5 for k in range(6)]
             else:
                 rb = [top + (bottom - top) * k // 5 for k in range(6)]
-            rb = _snap(rb, grid_sig, top, bottom, radius=40)
+            # Larger snap radius for last card in forced path (grid lines fade at bottom)
+            snap_radius = 80 if (i + 1 == len(boxes) and trust_box_x) else 40
+            snap_lo = sig_top if (i + 1 == len(boxes) and trust_box_x) else top
+            rb = _snap(rb, grid_sig, snap_lo, bottom, radius=snap_radius)
         else:
-            rb = [max(top + 2, min(bottom - 2, int(y))) for y in rb]
+            # Used pre-supplied rows (a re-cut pass / pre_row_bounds).  For
+            # the last forced card the true first grid line can sit ABOVE the
+            # header box bottom (deep taps), so relax the low-side clamp --
+            # sig_top already extends up to ~1.6 upper pitches above `top`.
+            rb_lo = (sig_top if (i + 1 == len(boxes) and trust_box_x)
+                     else top + 2)
+            rb = [max(rb_lo, min(bottom - 2, int(y))) for y in rb]
             prev_pitch = float(np.median([rb[k + 1] - rb[k] for k in range(5)]))
+
+        # Last forced card: also derive the grid by row-wise CONTRAST lattice
+        # (robust when the bottom of the sheet is dark/saturated and the
+        # dark-ink dip can't see the grid).  Not adopted here -- the caller
+        # decodes both candidates with the model and keeps the better -- but
+        # exposed in trace for that decision.
+        if i + 1 == len(boxes) and trust_box_x and rb is not None:
+            est_pch = (seed_pitch or float(
+                np.median([rb[k + 1] - rb[k] for k in range(5)])))
+            est_pch = max(50.0, min(140.0, est_pch))
+            cl = _last_card_contrast_lattice(
+                gray, top, bottom, x0, x1, est_pch)
+            rb_contrast = ([rows_c for rows_c, _ in cl]
+                           if cl is not None else None)
+        else:
+            rb_contrast = None
 
         # ---- COLUMNS: cross-card vertical lattice (explicit grid lines) ----
         # When cross-card clusters form a strong uniform lattice (printed
@@ -1117,16 +1256,20 @@ def _sheet_to_cells_with_boxes(
             # full template grid; a mismatched one often projects only a
             # subset.  But if the fallback span is unreasonably large
             # (>600px, likely the shared sheet extent rather than per-card),
-            # the fallback is unreliable and we should be lenient with hom.
+            # the fallback is unreliable and we should compare against the
+            # expected single-card span (~475px) instead.
             fallback_span = cb[-1] - cb[0]
             hom_span = hc[-1] - hc[0]
-            # Expected single-card span ~5 * 95 = 475px
+            EXPECTED_CARD_WIDTH = 475
             if fallback_span > 600:
-                # Fallback is likely the shared extent; use lenient threshold
-                threshold = 0.5
+                # Fallback is likely the shared extent; compare against
+                # expected single-card width, not the shared extent.
+                threshold = 0.7
+                reference_span = 475
             else:
                 threshold = 0.7
-            if hom_span < threshold * fallback_span:
+                reference_span = fallback_span
+            if hom_span < threshold * reference_span:
                 use_hom = False
                 # Fall through to keep cb
 
@@ -1225,6 +1368,9 @@ def _sheet_to_cells_with_boxes(
                 "top": top,
                 "bottom": bottom,
                 "rows": [int(v) for v in rb],
+                "rows_contrast": ([[int(v) for v in cand]
+                                  for cand in rb_contrast]
+                                  if rb_contrast is not None else None),
                 "cb_eq": [int(v) for v in cb_eq],
                 "cb_used": [int(v) for v in cb],
                 "hom": (list(hom_cols[i]) if hom_cols is not None
@@ -1427,9 +1573,8 @@ def _frame_bright_extent_card(gray, hx0, hx1, top, bottom):
 
 def forced_card_bboxes(img, band_tops):
     """Build 3 card-band boxes from user-tapped rows.  Column extent
-    comes from the header region (where B I N G O letters print strongly
-    even on washed-out sheets) + fixed card width.  Avoids fragile grid-line
-    detection for the horizontal extent."""
+    comes from header-template homography when available (most reliable),
+    falls back to sheet bright-paper extent + fixed card width."""
     H, W = img.shape[:2]
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     tops = sorted(int(round(min(H - 2, max(2, float(t)))))
@@ -1437,55 +1582,12 @@ def forced_card_bboxes(img, band_tops):
     if len(tops) < 3:
         return []
     
-    # Left edge from the first card's header band (just below the tap).
-    # The B I N G O letters print dark even on washed-out sheets.
-    h = int(max(30, min(90, round(0.13 * (tops[1] - tops[0])))))
-    header_y0 = tops[0]
-    header_y1 = min(H - 2, tops[0] + h)
-    header_band = gray[header_y0:header_y1, :]
-    if header_band.size == 0:
+    # Provisional boxes from taps using full frame extent
+    ext = _frame_bright_extent(gray)
+    if ext is None:
         return []
-    colmean = header_band.mean(axis=0).astype(np.uint8)
-    thr, _ = cv2.threshold(colmean, 0, 255,
-                           cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    dark = colmean < max(40, int(thr) * 0.85)
-    dark_cols = np.where(dark)[0]
-    if dark_cols.size == 0:
-        return []
-    # Left edge = first substantial dark run that's not the image edge.
-    # The very first run is often the paper/desk edge at column 0.
-    runs = []
-    cur = None
-    for x, b in enumerate(dark):
-        if b and cur is None:
-            cur = [x, x]
-        elif b:
-            cur[1] = x
-        elif cur is not None:
-            runs.append(cur)
-            cur = None
-    if cur is not None:
-        runs.append(cur)
-    runs = [r for r in runs if r[1] - r[0] >= 15]
-    if not runs:
-        return []
-    # Skip runs that start at the very edge (paper/desk edge)
-    sx0 = None
-    for r in runs:
-        if r[0] > 10:  # not at the absolute edge
-            sx0 = int(r[0])
-            break
-    if sx0 is None:
-        sx0 = int(runs[0][0])  # fallback to first run
-    
-    # Fixed card width: 5 columns * ~95px pitch
-    CARD_WIDTH = 475
-    sx1 = sx0 + CARD_WIDTH
-    # Clamp to image bounds
-    sx0 = max(0, min(sx0, W - CARD_WIDTH))
-    sx1 = min(W, sx0 + CARD_WIDTH)
-    
-    boxes = []
+    fx0, fx1 = ext
+    prov_boxes = []
     for i, t in enumerate(tops):
         pitch = (tops[1] - tops[0]) if i == 0 else (tops[i] - tops[i - 1])
         if i + 1 < len(tops):
@@ -1494,6 +1596,72 @@ def forced_card_bboxes(img, band_tops):
             next_t = min(H, t + int(round(1.25 * max(120, pitch))))
         h = int(max(30, min(90, round(0.13 * pitch))))
         y1 = min(H - 2, t + h)
+        prov_boxes.append((0, t, W, int(y1)))  # full width provisional
+    
+    # Try to get homography columns from provisional boxes (most reliable)
+    hom_cols = None
+    try:
+        # Build provisional boxes for homography
+        h = int(max(30, min(90, round(0.13 * (tops[1] - tops[0])))))
+        h3 = int(max(30, min(90, round(0.13 * (tops[2] - tops[1])))))
+        prov_boxes_hom = [
+            (0, tops[0], W, min(H - 2, tops[0] + int(max(30, min(90, round(0.13 * (tops[1] - tops[0]))))))),
+            (0, tops[1], W, min(H - 2, tops[1] + int(max(30, min(90, round(0.13 * (tops[1] - tops[0]))))))),
+            (0, tops[2], W, min(H - 2, tops[2] + int(round(1.25 * max(120, tops[1] - tops[0]))))),
+        ]
+        hom_cols = _header_homography_columns(gray, prov_boxes_hom, 0, W)
+    except Exception:
+        hom_cols = None
+    
+    # If homography succeeded, use those columns directly for box x-coords
+    if hom_cols is not None and all(h is not None for h in hom_cols):
+        boxes = []
+        for i, t in enumerate(tops):
+            pitch = (tops[1] - tops[0]) if i == 0 else (tops[i] - tops[i-1])
+            next_t = tops[i+1] if i+1 < len(tops) else min(H, t + int(round(1.25*max(120, tops[1]-tops[0]))))
+            h = int(max(30, min(90, round(0.13 * (tops[1]-tops[0])))))
+            y1 = min(H-2, t + h)
+            # Use homography columns: leftmost = first col - pitch, rightmost = last col + pitch
+            hc = hom_cols[i]
+            pitch = float(np.median(np.diff(np.array(hc, float))))
+            sx0 = int(max(0, hc[0] - pitch))
+            sx1 = int(min(W, hc[-1] + pitch))
+            y1 = min(H-2, t + int(max(30, min(90, round(0.13*(tops[1]-tops[0]))))))
+            boxes.append((int(sx0), t, int(sx1), int(y1)))
+        return boxes
+    
+    # Fallback: frame extent + fixed width
+    ext = _frame_bright_extent(gray)
+    if ext is None:
+        return []
+    fx0, fx1 = ext
+    prov_boxes = []
+    for i, t in enumerate(tops):
+        pitch = (tops[1] - tops[0]) if i == 0 else (tops[i] - tops[i-1])
+        next_t = tops[i+1] if i+1 < len(tops) else min(H, t + int(round(1.25*max(120, pitch))))
+        h = int(max(30, min(90, round(0.13 * (tops[1]-tops[0])))))
+        y1 = min(H-2, t + h)
+        prov_boxes.append((0, t, W, int(y1)))
+    
+    sheet_ext = _frame_bright_extent(gray, [(0, b[1], W, b[3]) for b in [(0,t,W,int(t+max(30,min(90,round(0.13*(tops[1]-tops[0])))))) for t in tops]])
+    if sheet_ext is None:
+        return []
+    sx0, sx1 = sheet_ext
+    
+    CARD_WIDTH = 475
+    if sx1 - sx0 > CARD_WIDTH:
+        mid = (sx0 + sx1) // 2
+        sx0 = max(0, (sx0 + sx1) // 2 - CARD_WIDTH // 2)
+        sx1 = min(W, sx0 + CARD_WIDTH)
+    elif sx1 - sx0 < CARD_WIDTH:
+        sx1 = min(W, sx0 + CARD_WIDTH)
+    
+    boxes = []
+    for i, t in enumerate(tops):
+        pitch = (tops[1] - tops[0]) if i == 0 else (tops[i] - tops[i-1])
+        next_t = tops[i+1] if i+1 < len(tops) else min(H, t + int(round(1.25*max(120, tops[1]-tops[0]))))
+        h = int(max(30, min(90, round(0.13 * (tops[1]-tops[0])))))
+        y1 = min(H-2, t + h)
         boxes.append((int(sx0), t, int(sx1), int(y1)))
     return boxes
 
@@ -1503,9 +1671,58 @@ def sheet_to_cells_forced(img, band_tops, verbose=False,
     """Card geometry pinned to user-tapped band tops -- the assisted-scan
     path for washed-out photos (e.g. gray sheets) where no header color
     gate can find the card bands on its own."""
+    # Get forced boxes first
+    boxes = forced_card_bboxes(img, band_tops)
+    if not boxes:
+        return _sheet_to_cells_with_boxes(
+            img, boxes, verbose, return_geometry,
+            trace, trust_box_x=True, pre_row_bounds=None)
+    
+    # Try to get row bounds from grid line detector on each card crop
+    # (more reliable than full-sheet detector for washed-out sheets)
+    pre_row_bounds = None
+    try:
+        from pipeline import find_grid_line_positions
+        pre_row_bounds = []
+        for i, (bx0, by0, bx1, by1) in enumerate(boxes):
+            top = by1 + 2
+            bottom = boxes[i + 1][1] if i + 1 < len(boxes) else img.shape[0]
+            if bottom - top < 60:
+                pre_row_bounds.append(None)
+                continue
+            card_crop = img[top:bottom, bx0:bx1]
+            if card_crop.size == 0:
+                pre_row_bounds.append(None)
+                continue
+            hy, _ = find_grid_line_positions(card_crop)
+            # Convert crop-relative coordinates to image coordinates
+            if hy:
+                abs_hy = [y + top for y in hy]
+                # Filter to 6 lines (5 rows)
+                if len(abs_hy) >= 6:
+                    abs_hy = sorted(abs_hy)
+                    # Accept only if 5 row gaps are pitch-regular and in
+                    # a sensible range; otherwise fall back to seeded rows
+                    # (the crop detector picks up faint digit strokes
+                    # which produce jagged tiny rows).
+                    rows6 = abs_hy[:6]
+                    gaps = [rows6[k+1]-rows6[k] for k in range(5)]
+                    med_gap = float(np.median(gaps))
+                    if (55 <= med_gap <= 130
+                            and max(abs(g-med_gap) for g in gaps) <= med_gap * 0.30):
+                        pre_row_bounds.append(rows6)
+                    else:
+                        pre_row_bounds.append(None)
+                else:
+                    pre_row_bounds.append(None)
+            else:
+                pre_row_bounds.append(None)
+    except Exception:
+        pre_row_bounds = None
+    
     return _sheet_to_cells_with_boxes(
-        img, forced_card_bboxes(img, band_tops), verbose, return_geometry,
-        trace, trust_box_x=True)
+        img, boxes, verbose, return_geometry,
+        trace, trust_box_x=True, pre_row_bounds=pre_row_bounds)
 
 
 def _card_x_extent(gray, y0, y1, cx):

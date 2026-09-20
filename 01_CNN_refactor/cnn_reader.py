@@ -233,6 +233,66 @@ def cells_from_forced(sheet_bgr, band_tops, trace=None):
     return by, boxes
 
 
+def _last_card_mean_conf(by_card, cid, model):
+    lgrid = {k: cell_logits(model, v) for k, v in by_card[cid].items()}
+    _, confs = decode_card(lgrid)
+    return float(np.mean([confs[r][c] for r in range(5) for c in range(5)
+                          if (r, c) != FREE]))
+
+
+def _adopt_contrast_last_card(model, sheet_bgr, band_tops, by_card, bboxes,
+                              trace):
+    """Last-card rows decision for assisted scans.  The geometry pass also
+    derives the grid from a row-wise CONTRAST lattice (see
+    _last_card_contrast_lattice), which recovers the true bottom-card pitch
+    when perspective makes it grow well past the upper cards' median and the
+    dark bottom hides the printed lines.  Whether to keep it depends on the
+    model: re-cut card 3 with each contrast candidate and adopt the best when
+    its decoded cell confidence beats the fallback's."""
+    cards_t = (trace or {}).get("cards") or []
+    if not band_tops or not cards_t or 3 not in by_card:
+        return
+    cands = cards_t[-1].get("rows_contrast") or []
+    if not cands:
+        return
+    used = cards_t[-1].get("rows")
+    mc_used = _last_card_mean_conf(by_card, 3, model)
+    boxes = photo_sheet_cells.forced_card_bboxes(sheet_bgr, band_tops)
+    best = None
+    for cand in cands:
+        if cand == used:
+            continue
+        items = photo_sheet_cells._sheet_to_cells_with_boxes(
+            sheet_bgr, boxes, return_geometry=True,
+            pre_row_bounds=[None, None, cand], trust_box_x=True)
+        c2 = {}
+        for cid, r, c, cell, box in items:
+            c2.setdefault(cid, {})[(r, c)] = cell
+        if 3 not in c2:
+            continue
+        mc = _last_card_mean_conf(c2, 3, model)
+        if best is None or mc > best[0]:
+            best = (mc, cand, c2)
+    if best is not None and best[0] > mc_used:
+        mc_cc, cc, c2 = best
+        by_card[3] = c2[3]
+        items = photo_sheet_cells._sheet_to_cells_with_boxes(
+            sheet_bgr, boxes, return_geometry=True,
+            pre_row_bounds=[None, None, cc], trust_box_x=True)
+        b2 = {}
+        for cid, r, c, cell, box in items:
+            b2.setdefault(cid, {})[(r, c)] = box
+        if 3 in b2:
+            bboxes[3] = b2[3]
+        print(f"[geo] card3 contrast re-pick rows {used} -> {cc} "
+              f"(mc {mc_used:.2f} -> {mc_cc:.2f})", flush=True)
+    elif best is not None:
+        mc_cc, cc, _ = best
+        print(f"[geo] card3 contrast candidate {cc} REJECTED "
+              f"(fallback mc {mc_used:.2f}, best candidate {mc_cc:.2f})",
+              flush=True)
+
+
 def cell_logits(model, cell_bgr):
     """(75,) float32 logits for one BGR or grayscale cell."""
     if cell_bgr.ndim == 3 and cell_bgr.shape[2] == 3:
@@ -344,8 +404,14 @@ def read_sheet_bytes(model, data, forced_bands=None):
     # normalized image (normalization can reveal faded headers).
     if norm_boxes is not None and len(norm_boxes) < 3:
         norm_detected = teal_card_bboxes(norm)
-        if len(norm_detected) > len(norm_boxes):
-            norm_boxes = norm_detected
+        # Only upgrade to normalized detection if it finds a full sheet (3 cards)
+        # AND the grid detector on the original confirms at least 2 cards.
+        # This avoids false positives from enhanced teal on partial sheets.
+        if len(norm_detected) == 3:
+            from photo_sheet_cells import grid_line_card_bboxes
+            grid_boxes, _, truncated = grid_line_card_bboxes(orig)
+            if len(grid_boxes) >= 2 and not truncated:
+                norm_boxes = norm_detected
 
     # Last-resort fallback for washed-out gray sheets: when color-based
     # header detection finds fewer than a full sheet, infer card tops from
@@ -354,7 +420,11 @@ def read_sheet_bytes(model, data, forced_bands=None):
     # If the fallback detects truncation, return a retake error directly
     # to force assisted scan (don't use bogus color boxes).
     pre_row_bounds = None
-    if norm_boxes is None or len(norm_boxes) < 3:
+    # Assisted (forced) scans trust the user's taps -- skip the auto-only
+    # fallback/truncation gates entirely (a washed-out sheet can trip the
+    # grid-truncation hedge and spuriously reject a scan that already has 3
+    # user-confirmed header bars).
+    if not forced_bands and (norm_boxes is None or len(norm_boxes) < 3):
         from photo_sheet_cells import grid_line_card_bboxes
         grid_boxes, grid_row_bounds, truncated = grid_line_card_bboxes(orig)
         if len(grid_boxes) >= 2 and not truncated:
@@ -384,7 +454,8 @@ def read_sheet_bytes(model, data, forced_bands=None):
                 "hue_med": round(float(hue[0])),
                 "hue_pct20_80": [round(float(x), 1) for x in hue[1]],
                 "sat_med": round(float(hue[2])),
-                "val_med": round(float(hue[3]))}}
+"val_med": round(float(hue[3])),
+                "in_h": int(norm.shape[0])}}
 
     # Keep the RAW phone bytes next to the normalized dump so a misread can
     # be reproduced exactly: normalization + warp destroy the original color
@@ -404,6 +475,15 @@ def read_sheet_path(model, path):
     """Read a full photo from disk -> server-shaped /scan-card payload."""
     data = Path(path).read_bytes()
     return read_sheet_bytes(model, data)
+
+
+def warped_sheet_height(data):
+    """Height of the normalized+warped sheet for raw photo bytes — the
+    coordinate space /scan-assist's band_tops must ultimately land in
+    (matches the in_*.png debug dump).  Used to scale client taps that
+    arrive in the downscaled served-image pixel space."""
+    orig = load_photo_bytes(data)
+    return _warp_sheet(_normalize(orig))[0].shape[0]
 
 
 def _structure_ok(bboxes, band_tops=None):
@@ -466,11 +546,14 @@ def _read_sheet(model, sheet_bgr, forced_bands=None, pre_boxes=None,
     misread can be diagnosed after the fact.
     """
     sheet_bgr, warped = _warp_sheet(sheet_bgr)
+    dbg_h = int(sheet_bgr.shape[0])
     blur = _sheet_blur(cv2.cvtColor(sheet_bgr, cv2.COLOR_BGR2GRAY))
     blurry = blur < BLUR_REVIEW_THRESHOLD
     trace = {}
     if forced_bands:
         by_card, bboxes = cells_from_forced(sheet_bgr, forced_bands, trace)
+        _adopt_contrast_last_card(model, sheet_bgr, forced_bands, by_card,
+                                  bboxes, trace)
     elif pre_boxes is not None:
         # Use pre-detected boxes (from original image, scaled to normalized)
         from photo_sheet_cells import _sheet_to_cells_with_boxes
@@ -526,7 +609,8 @@ def _read_sheet(model, sheet_bgr, forced_bands=None, pre_boxes=None,
             "hue_med": round(float(hue[0])),
             "hue_pct20_80": [round(float(x), 1) for x in hue[1]],
             "sat_med": round(float(hue[2])),
-            "val_med": round(float(hue[3]))}}
+            "val_med": round(float(hue[3])),
+            "in_h": dbg_h}}
     if not by_card:
         if forced_bands:
             msg = ("assisted scan found no cells at the tapped rows - tap "
@@ -542,7 +626,8 @@ def _read_sheet(model, sheet_bgr, forced_bands=None, pre_boxes=None,
             "hue_med": round(float(hue[0])),
             "hue_pct20_80": [round(float(x), 1) for x in hue[1]],
             "sat_med": round(float(hue[2])),
-            "val_med": round(float(hue[3]))}}
+            "val_med": round(float(hue[3])),
+            "in_h": dbg_h}}
     if forced_bands and len(by_card) != 3:
         # Assisted scans are pinned to 3 user taps — silently emitting 2
         # cards means a tap landed on the wrong bar, so error for a re-tap.
@@ -554,7 +639,8 @@ def _read_sheet(model, sheet_bgr, forced_bands=None, pre_boxes=None,
             "ts": str(ts),
             "dump_orig": str(dbg / f"orig_{ts}.jpg"),
             "bands": sorted({v[1] for cell_boxes in bboxes.values()
-                             for v in cell_boxes.values()}) if bboxes else []}}
+                             for v in cell_boxes.values()}) if bboxes else [],
+            "in_h": dbg_h}}
 
     cards = []
     for cid in sorted(by_card):
@@ -589,7 +675,8 @@ def _read_sheet(model, sheet_bgr, forced_bands=None, pre_boxes=None,
         "warped": bool(warped),
         "blur": round(blur, 1),
         "blurry": blurry,
-        "geometry": trace}}
+        "geometry": trace,
+        "in_h": dbg_h}}
 
 
 PENDING_DIR = Path("/tmp/phone_learning_pending")

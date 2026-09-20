@@ -292,7 +292,7 @@ function scheduleReconnect() {
 }
 
 let missedPings = 0;
-const MAX_MISSED = 3;
+const MAX_MISSED = 10;
 let heartbeatTimer;
 
 function startHeartbeat(socket) {
@@ -304,7 +304,7 @@ function startHeartbeat(socket) {
       return;
     }
     socket.send(JSON.stringify({ type: "ping" }));
-  }, 10000); // every 10s
+  }, 30000); // every 30s (background tabs throttle timers to ~1/min)
 }
 
 

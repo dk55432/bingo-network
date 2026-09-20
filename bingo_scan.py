@@ -41,7 +41,7 @@ from typing import Optional
 import cv2
 import numpy as np
 from fastapi import APIRouter, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from bingo_card import BingoCard
@@ -153,7 +153,7 @@ async def scan_debug_overlay(ts: int):
     f = Path("/tmp/cnn_reader_debug") / f"overlay_{ts}.png"
     if not f.is_file():
         raise HTTPException(status_code=404, detail="no such scan overlay")
-    return FileResponse(f, media_type="image/png")
+    return _serve_debug_image(f)
 
 
 @router.get("/scan-debug-in/{ts}.png")
@@ -163,7 +163,31 @@ async def scan_debug_in(ts: int):
     f = Path("/tmp/cnn_reader_debug") / f"in_{ts}.png"
     if not f.is_file():
         raise HTTPException(status_code=404, detail="no such scan photo")
-    return FileResponse(f, media_type="image/png")
+    return _serve_debug_image(f)
+
+
+# The debug PNGs (full-resolution normalized sheets) are ~4MB each — far too
+# big to ship to a phone browser.  Downscale + JPEG for display; taps are
+# scaled back to full resolution client-side via debug.in_h.
+DEBUG_IMAGE_MAX_H = 900
+
+
+def _serve_debug_image(f: Path, max_h: int = DEBUG_IMAGE_MAX_H,
+                       quality: int = 85):
+    img = cv2.imread(str(f))
+    if img is None:
+        raise HTTPException(status_code=404, detail="no such scan image")
+    h, w = img.shape[:2]
+    if h > max_h:
+        img = cv2.resize(
+            img, (max(1, round(w * max_h / h)), max_h),
+            interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    if not ok:
+        raise HTTPException(status_code=500,
+                            detail="could not encode scan image")
+    return Response(content=buf.tobytes(), media_type="image/jpeg",
+                    headers={"X-Image-Height": str(h), "Cache-Control": "no-store"})
 
 
 @router.post("/scan-card")
@@ -271,10 +295,20 @@ async def scan_assist(file: UploadFile, band_tops: str = Form(...)):
 
     file_bytes = await file.read()
     try:
+        # Taps arrive in the pixel space of the SERVED assist image
+        # (/scan-debug-in, downscaled to DEBUG_IMAGE_MAX_H tall for the
+        # phone).  Scale them back up to the full normalized sheet height
+        # so a client tap (naturalHeight-based, any JS version) lands on
+        # the same physical row regardless of how the image was served.
+        cr = _cnn_module()
+        H = cr.warped_sheet_height(file_bytes)
+        served_h = H if H <= DEBUG_IMAGE_MAX_H else DEBUG_IMAGE_MAX_H
+        scale = (H / served_h) if served_h else 1.0
+        tops = [float(t) * scale for t in tops]
         # Re-normalize the ORIGINAL photo (deterministic) so tap coordinates
         # from the /scan-debug-in dump match the image actually processed.
-        result = _cnn_module().read_sheet_bytes(
-            _cnn_model(), file_bytes, forced_bands=[float(t) for t in tops])
+        result = cr.read_sheet_bytes(
+            _cnn_model(), file_bytes, forced_bands=tops)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if result.get("error"):

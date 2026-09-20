@@ -195,7 +195,9 @@ async def websocket_endpoint(websocket: WebSocket):
         # that cadence. There is no protocol-level WebSocket.ping() in
         # starlette — calling one here raised AttributeError, broke the
         # loop, and leaked every reconnecting socket from active_connections.
-        HEARTBEAT_INTERVAL = 15
+        # Set to 60s to tolerate background-tab throttling (browsers throttle
+        # setInterval to ~1/min in inactive tabs).
+        HEARTBEAT_INTERVAL = 60
         
         while True:
             try:
