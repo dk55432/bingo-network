@@ -240,56 +240,76 @@ def _last_card_mean_conf(by_card, cid, model):
                           if (r, c) != FREE]))
 
 
-def _adopt_contrast_last_card(model, sheet_bgr, band_tops, by_card, bboxes,
-                              trace, boxes=None):
+def _crop_card_cells(sheet_bgr, cb, rows):
+    """Re-crop one card's 25 cells directly from the warped sheet: the
+    geometry's column lattice (cb) is independent of the row lattice, so a
+    candidate row run can be evaluated without recomputing any geometry.
+    Cell boxes are returned alongside so an adopted lattice also fixes the
+    overlay.  cb/rows are 6-element grids; cells are inset the same way the
+    geometry pass crops them."""
+    inset = photo_sheet_cells.INSET
+    cells, boxes = {}, {}
+    for r in range(5):
+        yA, yB = rows[r], rows[r + 1]
+        if yB - yA <= 2 * inset:
+            continue
+        for c in range(5):
+            xA, xB = cb[c], cb[c + 1]
+            if xB - xA <= 2 * inset:
+                continue
+            cell = sheet_bgr[yA + inset:yB - inset, xA + inset:xB - inset]
+            if cell.size == 0:
+                continue
+            cells[(r, c)] = cell
+            boxes[(r, c)] = (xA, yA, xB, yB)
+    return cells, boxes
+
+
+def _adopt_contrast_last_card(model, sheet_bgr, by_card, bboxes, trace):
     """Last-card rows decision (assisted AND auto scans).  The geometry pass
     also derives the grid from a row-wise CONTRAST lattice (see
     _last_card_contrast_lattice), which recovers the true bottom-card pitch
     and first line when perspective makes the pitch grow well past the upper
     cards' median and the faint line 0 hides the printed-grid start.  Whether
-    to keep it depends on the model: re-cut card 3 with each contrast
-    candidate and adopt the best when its decoded cell confidence beats the
-    fallback's.  boxes: pre-derived card boxes in sheet_bgr space; when
-    omitted they are rebuilt from the band taps through
-    forced_card_bboxes (the assisted path)."""
+    to keep it depends on the model: re-cut card 3 under each distinct
+    contrast candidate and adopt the best when its decoded cell confidence
+    beats the fallback's.  Re-cuts use the already-computed column lattice
+    (same columns, only the rows move), which keeps this cheap -- a full
+    per-candidate geometry pass made every auto scan ~5x slower."""
     cards_t = (trace or {}).get("cards") or []
     if not cards_t or 3 not in by_card:
         return
-    if boxes is None:
-        if not band_tops:
-            return
-        boxes = photo_sheet_cells.forced_card_bboxes(sheet_bgr, band_tops)
-    cands = cards_t[-1].get("rows_contrast") or []
-    if not cands:
+    c3 = cards_t[-1]
+    cands = c3.get("rows_contrast") or []
+    cb = c3.get("cb_used")
+    if not cands or not cb:
         return
-    used = cards_t[-1].get("rows")
+    used = c3.get("rows")
     mc_used = _last_card_mean_conf(by_card, 3, model)
-    best = None
+    # The contrast sweep emits one variant per line-0 offset (a handful of
+    # ~3px steps); keep only genuinely distinct lattices.
+    distinct = []
     for cand in cands:
         if cand == used:
             continue
-        items = photo_sheet_cells._sheet_to_cells_with_boxes(
-            sheet_bgr, boxes, return_geometry=True,
-            pre_row_bounds=[None, None, cand], trust_box_x=True)
-        c2 = {}
-        for cid, r, c, cell, box in items:
-            c2.setdefault(cid, {})[(r, c)] = cell
-        if 3 not in c2:
+        if any(max(abs(a - b) for a, b in zip(cand, o)) <= 3
+               for o in distinct):
             continue
-        mc = _last_card_mean_conf(c2, 3, model)
+        distinct.append(cand)
+    best = None
+    for cand in distinct:
+        cells3, _ = _crop_card_cells(sheet_bgr, cb, cand)
+        if not cells3:
+            continue
+        mc = _last_card_mean_conf({3: cells3}, 3, model)
         if best is None or mc > best[0]:
-            best = (mc, cand, c2)
+            best = (mc, cand, cells3)
     if best is not None and best[0] > mc_used:
-        mc_cc, cc, c2 = best
-        by_card[3] = c2[3]
-        items = photo_sheet_cells._sheet_to_cells_with_boxes(
-            sheet_bgr, boxes, return_geometry=True,
-            pre_row_bounds=[None, None, cc], trust_box_x=True)
-        b2 = {}
-        for cid, r, c, cell, box in items:
-            b2.setdefault(cid, {})[(r, c)] = box
-        if 3 in b2:
-            bboxes[3] = b2[3]
+        mc_cc, cc, cells3 = best
+        by_card[3] = cells3
+        _, b3 = _crop_card_cells(sheet_bgr, cb, cc)
+        if b3:
+            bboxes[3] = b3
         print(f"[geo] card3 contrast re-pick rows {used} -> {cc} "
               f"(mc {mc_used:.2f} -> {mc_cc:.2f})", flush=True)
     elif best is not None:
@@ -558,8 +578,7 @@ def _read_sheet(model, sheet_bgr, forced_bands=None, pre_boxes=None,
     trace = {}
     if forced_bands:
         by_card, bboxes = cells_from_forced(sheet_bgr, forced_bands, trace)
-        _adopt_contrast_last_card(model, sheet_bgr, forced_bands, by_card,
-                                  bboxes, trace)
+        _adopt_contrast_last_card(model, sheet_bgr, by_card, bboxes, trace)
     elif pre_boxes is not None:
         # Use pre-detected boxes (from original image, scaled to normalized)
         from photo_sheet_cells import _sheet_to_cells_with_boxes
@@ -571,8 +590,7 @@ def _read_sheet(model, sheet_bgr, forced_bands=None, pre_boxes=None,
             by.setdefault(cid, {})[(r, c)] = cell
             boxes.setdefault(cid, {})[(r, c)] = box
         by_card, bboxes = by, boxes
-        _adopt_contrast_last_card(model, sheet_bgr, None, by_card, bboxes,
-                                  trace, boxes=pre_boxes)
+        _adopt_contrast_last_card(model, sheet_bgr, by_card, bboxes, trace)
     else:
         by_card, bboxes = cells_from(sheet_bgr, trace)
     for c in trace.get("cards", []):
