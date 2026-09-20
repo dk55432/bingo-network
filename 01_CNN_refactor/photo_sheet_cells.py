@@ -1212,8 +1212,19 @@ def _sheet_to_cells_with_boxes(
                     n += 1
             return n
 
+        # A dip-rebuilt lattice can drift sideways AND shrink on a pitched
+        # photo, skipping a column group: scan 1789934659 rewrote the honest
+        # equal division over the box width (431..1045) into a 486px lattice
+        # starting 25px in, dropping column 1.  The corrected lattice must
+        # genuinely reach the printed right border (~equal to the card width
+        # minus a margin) on top of the existing border bounds.
+        cand_pitch = (float(np.median(np.diff(np.array(cand, float))))
+                      if len(cand) == 6 else 0.0)
         if (_hough_agree(cand) >= 2 and _hough_agree(cand) >= _hough_agree(cb) and
                 min(cand) >= x0 - 25 and max(cand) <= x1 + 25 and
+                cand_pitch > 0 and
+                min(cand) >= x0 - 0.5 * cand_pitch and
+                x1 - max(cand) <= 0.8 * cand_pitch and
                 sum(dv[cand[k]] for k in range(1, 5)) >
                 sum(dv[cb[k]] for k in range(1, 5))):
             cb = cand
@@ -1257,14 +1268,19 @@ def _sheet_to_cells_with_boxes(
         # re-draw the same grid shifted a few px, so we keep the proven
         # equal-division columns (approved sheets stay byte-stable).
         use_hom = False
-        use_hom = False
         if hom_cols is not None and hom_cols[i] is not None:
             h_gaps = np.diff(np.array(hom_cols[i][1:5], float))
             h_pitch = float(np.median(h_gaps)) if h_gaps.size else 0.0
             cb_gaps = np.diff(np.array(cb[1:5], float))
             cb_pitch = float(np.median(cb_gaps)) if cb_gaps.size else 0.0
-            use_hom = (cb_pitch > 0.0 and abs(h_pitch - cb_pitch) >
-                       0.05 * cb_pitch)
+            # A real template homography projects the parallel BINGO columns to
+            # equally spaced lines, so wildly uneven projected gaps (e.g. 109/71
+            # on scan 1789934659 -- the header matched at the wrong scale) mean
+            # the match is bogus; keep the equal-division columns instead.
+            h_ratio = (float(h_gaps.max() / max(h_gaps.min(), 1.0))
+                       if h_gaps.size >= 2 else 1.0)
+            use_hom = (h_ratio <= 1.25 and cb_pitch > 0.0 and
+                       abs(h_pitch - cb_pitch) > 0.05 * cb_pitch)
         if use_hom:
             # Card's header matched a template: the BINGO letters anchor a
             # perspective-accurate homography, so its projected columns beat
@@ -1363,7 +1379,8 @@ def _sheet_to_cells_with_boxes(
             if (cb == cb_eq and aligned < 3):
                 lx0, lp = lattice
                 lx = [lx0 + lp * k for k in range(6)]
-                if 0 <= lx[0] and lx[-1] < gray.shape[1]:
+                if (0 <= lx[0] and lx[-1] < gray.shape[1] and
+                        lx[0] >= x0 - 0.5 * lp and x1 - lx[-1] <= 0.8 * lp):
                     own = sum(1 for k in range(1, 5)
                               if any(abs(lx[k] - h) <= 6 for h in vx_abs))
                     if own >= 2 or (sheet_aligned and own >= 1):
@@ -1383,6 +1400,32 @@ def _sheet_to_cells_with_boxes(
             gap_ar = np.diff(rb[1:5])
             prev_pitch2 = prev_pitch
             prev_pitch = float(np.median(gap_ar)) if gap_ar.size else None
+
+        # ---- ROWS: band-anchored guard (non-last cards) ----
+        # The interior-dip rebuild (_fix_row_lattice) fits a uniform lattice
+        # to the snapped interior dividers, which on a pitched/keystoned
+        # close-up can drift hard off the printed rows: the 107px lattice it
+        # rebuilt on the top card of scan 1789934659 runs into the next
+        # card's header (band pitch is 84).  Bingo grids are inset from the
+        # band by a printed margin, so interior pitch legitimately differs
+        # from the band pitch by ~10-20% (approved sheets sit there); only a
+        # SEVERE mismatch (>25%, far outside any inset) means the rebuild
+        # latched onto spurious dividers, and the card's own band then is
+        # the reliable anchor.
+        if (len(rb) == 6 and not used_pre and i + 1 < len(boxes) and
+                bottom > top and (bottom - top) >= 5 * 60):
+            band_p = float((bottom - top) / 5.0)
+            gaps_prod = [rb[k + 1] - rb[k] for k in range(5)]
+            p_prod = float(np.median(gaps_prod)) if gaps_prod else 0.0
+            drift_p = (abs(p_prod - band_p) / band_p
+                       if band_p > 0 and p_prod > 0 else 0.0)
+            if drift_p > 0.25:
+                rb = [top + round(band_p * k) for k in range(6)]
+                gap_ar = np.diff(rb[1:5])
+                prev_pitch = float(np.median(gap_ar)) if gap_ar.size else None
+                if verbose:
+                    print(f"card{i + 1}: band-anchored rows (pv={p_prod:.0f} "
+                          f"band={band_p:.0f}, drift {drift_p:.2f}) {rb}")
 
         if verbose:
             print(f"card{i + 1}: band ({x0},{y0})-({x1},{y1}) "

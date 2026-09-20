@@ -38,6 +38,12 @@ _SCAN_WIDTH = 1257
 # the constrained decode reads mushy cells and commits wrong numbers.  Flag
 # those reads for review instead of trusting them.
 BLUR_REVIEW_THRESHOLD = 500.0
+# A card whose cells decode below these per-cell mean / min probabilities had
+# geometry sliced into the wrong rows/columns (pitched close-ups like scan
+# 1789934659) and should be flagged for manual review rather than recorded
+# silently.  Healthy upright sheets decode well above these (>= ~0.9 mean).
+REVIEW_MEAN_CONF = 0.55
+REVIEW_MIN_CONF = 0.08
 
 # ImageFolder sorted classes lexicographically ("1","10","11",...), so the
 # model's output index does NOT equal the number.  Map between them.
@@ -402,6 +408,159 @@ def card_result(numbers, confs):
     return {"grid": grid, "needs_review": needs_review}
 
 
+def _recover_lattice(boxes_per_cell):
+    """Reconstruct the uniform 6-boundary (rows, cols) lattice a card's
+    cell boxes were cut from (boxes_per_cell keys are (r, c))."""
+    rows, cols = None, None
+    for (r, c), (x0, y0, x1, y1) in boxes_per_cell.items():
+        if c == 0:
+            if rows is None:
+                rows = [None] * 6
+            rows[r] = y0
+            rows[r + 1] = y1
+        if r == 0:
+            if cols is None:
+                cols = [None] * 6
+            cols[c] = x0
+            cols[c + 1] = x1
+    if (rows is not None and None in rows) or (cols is not None and None in cols):
+        return None
+    return rows, cols
+
+
+def _card_decode_batched(model, sheet_bgr, rows, cols, rows_keep=None):
+    """Decode one 5x5 card with a SINGLE batched model forward pass.
+
+    rows_keep: iterate rows of rows rows to score (e.g. (0, 4) for a cheap
+    pitch/start probe -- the extremes carry the most lattice information).
+    Returns (mean_conf, numbers, confs) exactly like the per-cell path, or
+    None when any probed cell is too thin to crop (invalid geometry)."""
+    if len(rows) != 6 or len(cols) != 6:
+        return None
+    keep = tuple(range(5)) if rows_keep is None else tuple(rows_keep)
+    cells = []
+    keys = []
+    for r in keep:
+        for c in range(5):
+            if (r, c) == FREE:
+                continue
+            yA, yB, xA, xB = rows[r], rows[r + 1], cols[c], cols[c + 1]
+            if yB - yA <= 2 * photo_sheet_cells.INSET or \
+                    xB - xA <= 2 * photo_sheet_cells.INSET:
+                return None
+            cell = sheet_bgr[yA + photo_sheet_cells.INSET:yB - photo_sheet_cells.INSET,
+                             xA + photo_sheet_cells.INSET:xB - photo_sheet_cells.INSET]
+            if cell.size == 0 or cell.shape[0] < 2 or cell.shape[1] < 2:
+                return None
+            if cell.ndim == 3:
+                cell = cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY)
+            cells.append(cell_transform(Image.fromarray(cell)))
+            keys.append((r, c))
+    if not cells:
+        return None
+    x = torch.stack(cells).to(DEVICE)
+    with torch.no_grad():
+        logits = model(x).cpu().numpy().astype(np.float64)
+    lgrid = {k: logits[j] for j, k in enumerate(keys)}
+    numbers, confs = decode_card(lgrid)
+    mean_conf = np.mean([confs[r][c] for r in keep for c in range(5)
+                         if (r, c) != FREE])
+    return float(mean_conf), numbers, confs
+
+
+def _refit_card_geometry(model, sheet_bgr, card_id, rows, cols,
+                         sibling_rows, sibling_cols, base_mean_conf):
+    """Recover a low-confidence card's true lattice on a pitched photo.
+
+    A pitched close-up (e.g. scan 1789934659) makes the header-homography
+    and dip-snap paths drift: card 1's rebuilt rows came out at an impossible
+    107px pitch slicing into card 2's header.  The card's own band (card top
+    .. next card's band top) bounds a ~band-pitch grid, so search a small
+    lattice family around it and keep the best-decoding one.  Sibling cards
+    on the same sheet share the printed grid, so their proven columns are
+    tried first.  Only fired on low-confidence NON-last cards; healthy sheets
+    never call this (their mean conf is well above the review bar).
+
+    Returns (rows, cols) when a clearly-better lattice is found, else None."""
+    if sibling_rows is None:
+        return None
+    band_top = rows[0]
+    band_bottom = sibling_rows[0] - 2
+    band_p = float(max(40.0, (band_bottom - band_top) / 5.0))
+
+    # Candidate columns: our own first, then each sibling's (same printed
+    # grid, stacked cards), deduplicated.
+    col_cands = []
+    for cc in [cols, sibling_cols]:
+        if cc is not None and cc not in col_cands:
+            col_cands.append(list(cc))
+
+    best_cols = cols
+    best_cols_conf = base_mean_conf
+    for cc in col_cands:
+        res = _card_decode_batched(model, sheet_bgr, rows, cc,
+                                   rows_keep=(0, 4))
+        if res is None:
+            continue
+        conf, _, _ = res
+        if conf > best_cols_conf:
+            best_cols_conf = conf
+            best_cols = cc
+
+    # Phase 1: cheap probe of the whole band-anchored lattice family, scored
+    # on the top and bottom rows only (the extremes carry the pitch/start
+    # signal).  Phase 2 confirms the winner with a full-card decode.
+    best_probe = (base_mean_conf, None)
+    pitches = sorted({round(band_p * f)
+                      for f in (0.72, 0.8, 0.85, 0.9, 1.0, 1.1, 1.22)})
+    starts = sorted({round(band_top + o * band_p)
+                     for o in (-0.35, -0.2, -0.05, 0.1, 0.25)})
+    for p in pitches:
+        for s in starts:
+            r_cand = [s + round(p * k) for k in range(6)]
+            if r_cand[-1] > band_bottom + 8:
+                continue
+            res = _card_decode_batched(model, sheet_bgr, r_cand,
+                                       best_cols, rows_keep=(0, 4))
+            if res is None:
+                continue
+            conf, _, _ = res
+            if best_probe[1] is None or conf > best_probe[0]:
+                best_probe = (conf, r_cand)
+    probe_conf, r_probe = best_probe
+    if r_probe is None:
+        return None
+    # Phase 2: full-card decode of the probe winner, its pitch/start
+    # neighbors, and the original rows under the better columns.
+    best_full = (None, None)
+    candidates = [list(rows)]
+    p_best = r_probe[1] - r_probe[0]
+    s_best = r_probe[0]
+    lo_p = max(p_best - 3, int(round(p_best * 0.94)))
+    hi_p = min(p_best + 3, int(round(p_best * 1.06)))
+    for p in sorted({p_best, lo_p, hi_p}):
+        for s in sorted({s_best - 6, s_best, s_best + 6}):
+            candidates.append([s + round(p * k) for k in range(6)])
+    for r_cand in candidates:
+        if r_cand[-1] > band_bottom + 8:
+            continue
+        res = _card_decode_batched(model, sheet_bgr, r_cand, best_cols)
+        if res is None:
+            continue
+        conf, _, _ = res
+        if best_full[0] is None or conf > best_full[0]:
+            best_full = (conf, r_cand)
+    new_mean, new_rows = best_full
+    if new_rows is None:
+        return None
+    if new_mean >= 0.85 and new_mean > base_mean_conf + 0.10:
+        print(f"[refit] card{card_id}: rows {rows} -> {new_rows} "
+              f"cols -> {best_cols} mean_conf {base_mean_conf:.3f} -> "
+              f"{new_mean:.3f}", flush=True)
+        return list(new_rows), list(best_cols)
+    return None
+
+
 def _scale_boxes(boxes, orig_shape, new_shape):
     """Scale box coordinates from original image to normalized image."""
     oh, ow = orig_shape[:2]
@@ -669,6 +828,14 @@ def _read_sheet(model, sheet_bgr, forced_bands=None, pre_boxes=None,
             "in_h": dbg_h}}
 
     cards = []
+    lattices = {}
+    for cid in bboxes:
+        rec = _recover_lattice(bboxes[cid])
+        if rec is not None:
+            lattices[cid] = rec
+    last_cid = max(by_card) if by_card else None
+    refit_rows, refit_cols = {}, {}
+    any_refit = False
     for cid in sorted(by_card):
         lgrid = {}
         for (r, c), cell in by_card[cid].items():
@@ -681,9 +848,70 @@ def _read_sheet(model, sheet_bgr, forced_bands=None, pre_boxes=None,
                              if (r, c) != FREE])
         min_conf = min(confs[r][c] for r in range(5) for c in range(5)
                        if (r, c) != FREE)
-        if mean_conf < 0.25 or min_conf < 0.08:
+        if (mean_conf < REVIEW_MEAN_CONF and cid != last_cid and
+                cid in lattices and (cid + 1) in lattices):
+            # Low-confidence non-last card on (likely) a pitched photo: the
+            # geometry may be sliced.  Try the band-anchored lattice family
+            # with the sibling card's proven columns (same printed grid).
+            fit = _refit_card_geometry(
+                model, sheet_bgr, cid,
+                lattices[cid][0], lattices[cid][1],
+                lattices[cid + 1][0], lattices[cid + 1][1],
+                float(mean_conf))
+            if fit is not None:
+                nrows, ncols = fit
+                refit_rows[cid] = list(nrows)
+                refit_cols[cid] = list(ncols)
+                any_refit = True
+                by_card[cid] = {}
+                bboxes[cid] = {}
+                for r in range(5):
+                    for c in range(5):
+                        if (r, c) == FREE:
+                            continue
+                        yA, yB, xA, xB = (nrows[r], nrows[r + 1],
+                                          ncols[c], ncols[c + 1])
+                        if yB - yA <= 2 * photo_sheet_cells.INSET or \
+                                xB - xA <= 2 * photo_sheet_cells.INSET:
+                            continue
+                        cell = sheet_bgr[yA + photo_sheet_cells.INSET:
+                                         yB - photo_sheet_cells.INSET,
+                                         xA + photo_sheet_cells.INSET:
+                                         xB - photo_sheet_cells.INSET]
+                        if cell.size == 0:
+                            continue
+                        by_card[cid][(r, c)] = cell
+                        bboxes[cid][(r, c)] = (xA, yA, xB, yB)
+                lgrid = {}
+                for (r, c), cell in by_card[cid].items():
+                    lgrid[(r, c)] = cell_logits(model, cell)
+                numbers, confs = decode_card(lgrid)
+                result = card_result(numbers, confs)
+                if blurry:
+                    result["needs_review"] = True
+                mean_conf = np.mean([confs[r][c] for r in range(5)
+                                     for c in range(5) if (r, c) != FREE])
+                min_conf = np.min([confs[r][c] for r in range(5)
+                                   for c in range(5) if (r, c) != FREE])
+        if mean_conf < REVIEW_MEAN_CONF or min_conf < REVIEW_MIN_CONF:
             result["needs_review"] = True
         cards.append(result)
+
+    if any_refit:
+        # Keep the debug overlay + trace consistent with the refitted
+        # geometry the numbers actually came from.
+        overlay = sheet_bgr.copy()
+        for cid, cells in bboxes.items():
+            for (r, c), box in cells.items():
+                cv2.rectangle(overlay, (box[0], box[1]), (box[2], box[3]),
+                              (0, 220, 0), 2)
+        cv2.imwrite(str(dbg / f"overlay_{ts}.png"), overlay)
+        for c in trace.get("cards", []):
+            cid = c.get("card")
+            if cid in refit_rows:
+                c["rows"] = refit_rows[cid]
+                c["cb_used"] = refit_cols[cid]
+                c["refit"] = True
 
     if by_card:
         auto_grids = []
