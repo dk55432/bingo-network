@@ -523,6 +523,36 @@
       .catch(() => {});
   }
 
+  function prepUpload(file) {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        const maxH = 1600;
+        const scale = Math.min(1, maxH / img.naturalHeight);
+        if (scale >= 1) {
+          resolve({ blob: file, width: img.naturalWidth, height: img.naturalHeight });
+          return;
+        }
+        const w = Math.round(img.naturalWidth * scale);
+        const h = Math.round(img.naturalHeight * scale);
+        const cv = document.createElement("canvas");
+        cv.width = w;
+        cv.height = h;
+        cv.getContext("2d").drawImage(img, 0, 0, w, h);
+        cv.toBlob((b) => b
+          ? resolve({ blob: b, width: w, height: h })
+          : reject(new Error("encode failed")), "image/jpeg", 0.85);
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        reject(new Error("decode failed"));
+      };
+      img.src = url;
+    });
+  }
+
   fileInput.addEventListener("change", async () => {
     const file = fileInput.files[0];
     if (!file) return;
@@ -533,8 +563,20 @@
     statusEl.textContent = "Scanning…";
     hideBlurWarning();
 
+    // Phones upload the raw full-res photo (multi-MB JPEG/HEIC), which
+    // makes the scan hang on the upload link for minutes.  Re-encode it
+    // client-side to a smaller JPEG — the sheet has to fill the frame
+    // anyway, so 1600px tall is plenty and snaps the POST to a second.
+    let up;
+    try {
+      up = await prepUpload(file);
+    } catch (e) {
+      statusEl.textContent = "Couldn't read that photo — try again.";
+      uploadBox.style.display = "block";
+      return;
+    }
     const formData = new FormData();
-    formData.append("file", selectedFile);
+    formData.append("file", up.blob, "scan.jpg");
 
     try {
       const res = await fetch(`${API_BASE}/scan-card`, { method: "POST", body: formData });
@@ -579,19 +621,21 @@
   confirmCornersBtn.addEventListener("click", async () => {
     if (!selectedFile || !corners) return;
 
-    // Corners are stored as percentages of the displayed image box;
-    // convert to the original photo's actual pixel coordinates via
-    // naturalWidth/Height, independent of the on-screen render size.
+    // Corners are stored as percentages of the displayed image box; the
+    // upload is re-encoded to a smaller JPEG, so convert to the uploaded
+    // (downscaled) photo's pixel size — same as the preview seen on the
+    // corner picker, since prepUpload keeps the aspect ratio.
+    const up = await prepUpload(selectedFile);
     const cornerPixels = CORNER_ORDER.map((k) => [
-      Math.round((corners[k].x / 100) * previewImg.naturalWidth),
-      Math.round((corners[k].y / 100) * previewImg.naturalHeight),
+      Math.round((corners[k].x / 100) * up.width),
+      Math.round((corners[k].y / 100) * up.height),
     ]);
 
     cornerPicker.style.display = "none";
     statusEl.textContent = "Scanning…";
 
     const formData = new FormData();
-    formData.append("file", selectedFile);
+    formData.append("file", up.blob, "scan.jpg");
     formData.append("corners", JSON.stringify(cornerPixels));
 
     try {
