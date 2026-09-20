@@ -697,10 +697,21 @@ def _fix_row_lattice(rb, dip, top, bottom, gray=None, x0=0, x1=0):
             # the cell) and lower ink density, and cards whose top boundary
             # merely overhangs the header band (blank ratio just below the
             # row beneath, e.g. card 2) stay anchored as-is.
+            # A solid graphic block is printed UNIFORMLY across the cell
+            # (near-zero row-wise ink std), whereas a digit row whose true
+            # top line sat slightly above this estimate fills only the
+            # stroke rows -- high std.  Requiring low std keeps the re-anchor
+            # from firing on a digit-filled cell (which the dark-ratio tests
+            # alone can't tell from solid ink) and shifting the lattice one
+            # slot off the printed grid.
+            top_rows = (gray[rb[0]:rb[1], x0:x1] < 120).mean(axis=1) \
+                if rb[1] > rb[0] else np.array([])
+            top_std = float(top_rows.std()) if top_rows.size else 0.0
             if (top_b is not None and below_b is not None and
                     top_b < 0.02 and top_d > 0.40 and below_b > 0.03 and
                     top_b < 0.5 * below_b and
-                    top_line < 60 and top_anchor >= 0.5 * p):
+                    top_line < 60 and top_anchor >= 0.5 * p and
+                    top_std < 0.08):
                 # kept[0] is the grid's real top line: anchor the lattice
                 # there.  The last row extends past the card bottom (a
                 # truncated/blank row, flagged if unreadable).
@@ -1000,6 +1011,7 @@ def _sheet_to_cells_with_boxes(
     prev_pitch = None
     prev_pitch2 = None
     seed_pitch = None
+    prev_row_last = None
     for i, (hx0, y0, hx1, y1) in enumerate(boxes):
         top = y1 + 2
         bottom = boxes[i + 1][1] if i + 1 < len(boxes) else H
@@ -1023,7 +1035,7 @@ def _sheet_to_cells_with_boxes(
 
         # Compute grid signature for _fix_row_lattice (needed even with pre_row_bounds)
         # Use wider strip for last card in forced path to better detect
-        # faint horizontal grid lines across full card width
+        # faint horizontal grid lines across full card width.
         strip_w = 48 if (i + 1 == len(boxes) and trust_box_x) else 12
         sig_top = top
         up_pitch = 0.0
@@ -1093,7 +1105,22 @@ def _sheet_to_cells_with_boxes(
             rb_lo = (sig_top if (i + 1 == len(boxes) and trust_box_x)
                      else top + 2)
             rb = [max(rb_lo, min(bottom - 2, int(y))) for y in rb]
+            # Missing-top-line recovery: the grid-line detector chains only
+            # the VISIBLE lines of a card, so when the card's faint top grid
+            # line goes undetected the chain starts one line too low and pads
+            # at the bottom -- every row shifts up by one.  The tell is the
+            # gap from the previous card's last line to this card's first:
+            # a normal header slot is ~1.0-1.3x this card's pitch, while a
+            # missing top line makes it ~header + 1 pitch (~2.2x).  In that
+            # case prepend the extrapolated line and drop the padded tail.
+            if i > 0 and prev_row_last is not None and len(rb) == 6:
+                gaps_p = [rb[k + 1] - rb[k] for k in range(5)]
+                p = float(np.median(gaps_p)) if gaps_p else 0.0
+                gap = rb[0] - prev_row_last
+                if p >= 55 and gap > 1.6 * p and gaps_p:
+                    rb = [rb[0] - int(round(p))] + rb[:-1]
             prev_pitch = float(np.median([rb[k + 1] - rb[k] for k in range(5)]))
+            prev_row_last = rb[-1]
 
         # Last forced card: also derive the grid by row-wise CONTRAST lattice
         # (robust when the bottom of the sheet is dark/saturated and the
