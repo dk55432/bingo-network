@@ -113,10 +113,14 @@ async def join_page(request: Request):
 
 @app.get("/join")
 async def join_page(request: Request):
-    return templates.TemplateResponse(
+    resp = templates.TemplateResponse(
         request=request,
         name="join.html"
     )
+    # The phone's join page JS changed — never let the browser serve a
+    # stale cached copy, or old bugs (lost joins) survive a refresh.
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return resp
     
 @app.get("/player")
 async def player_page(request: Request):

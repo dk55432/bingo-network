@@ -39,6 +39,13 @@ WebSocket Status:
             // silently rejoin the queue instead of losing our spot.
             let isWaiting = localStorage.getItem("waiting_for_game_id") === gameId;
 
+            // Set true once the user clicks Join. The socket on the phone
+            // often flaps (drops+reconnects), and the join was being lost
+            // in the gap: the button stayed disabled and the page never
+            // re-sent the join. Retry the join on every reconnect until
+            // the server acknowledges (joined / waiting_for_next_game).
+            let joinPending = false;
+
             if (gameId) {
                 localStorage.setItem("game_id", gameId);
             } else {
@@ -68,6 +75,11 @@ WebSocket Status:
                         // We were mid-wait (or just reloaded while waiting) —
                         // silently rejoin the queue rather than making the
                         // person click Join again.
+                        sendJoin();
+                    } else if (joinPending) {
+                        // Join was clicked but our socket dropped before the
+                        // server acked — retry on the fresh connection.
+                        console.log("Re-sending join on reconnect");
                         sendJoin();
                     } else {
                         console.log("Requesting game status");
@@ -138,8 +150,16 @@ WebSocket Status:
             document.getElementById("joinButton").onclick = function() {
                 if (!gameId) return; // button is disabled in this case, but just in case
                 console.log("Join button clicked");
+                joinPending = true;
                 sendJoin();
                 document.getElementById("joinButton").disabled = true;
+
+                // Tell the user we're trying, since a flaky phone socket may
+                // need a few reconnect attempts before the join lands.
+                if (document.getElementById("status").textContent !== "Connected") {
+                    document.getElementById("gameStatus").innerText =
+                        "Game Status: retrying join… keep this page open";
+                }
             };
 
             function handleSocketMessage(event) {
@@ -154,6 +174,7 @@ WebSocket Status:
                 else if (data.type === "waiting_for_next_game") {
                     reconnectAttempts = 0;
                     isWaiting = true;
+                    joinPending = false;
                     localStorage.setItem("waiting_for_game_id", gameId);
                     document.getElementById("joinButton").disabled = true;
                     document.getElementById("displayName").disabled = true;
@@ -163,6 +184,7 @@ WebSocket Status:
                         "Game Status: " + data.status;
                 }
                 else if (data.type === "action_rejected") {
+                    joinPending = false;
                     document.getElementById("errorMessage").innerText =
                         "ERROR: " + data.reason;
                     document.getElementById("joinButton").disabled = false;
