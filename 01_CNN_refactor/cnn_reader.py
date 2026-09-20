@@ -241,23 +241,29 @@ def _last_card_mean_conf(by_card, cid, model):
 
 
 def _adopt_contrast_last_card(model, sheet_bgr, band_tops, by_card, bboxes,
-                              trace):
-    """Last-card rows decision for assisted scans.  The geometry pass also
-    derives the grid from a row-wise CONTRAST lattice (see
+                              trace, boxes=None):
+    """Last-card rows decision (assisted AND auto scans).  The geometry pass
+    also derives the grid from a row-wise CONTRAST lattice (see
     _last_card_contrast_lattice), which recovers the true bottom-card pitch
-    when perspective makes it grow well past the upper cards' median and the
-    dark bottom hides the printed lines.  Whether to keep it depends on the
-    model: re-cut card 3 with each contrast candidate and adopt the best when
-    its decoded cell confidence beats the fallback's."""
+    and first line when perspective makes the pitch grow well past the upper
+    cards' median and the faint line 0 hides the printed-grid start.  Whether
+    to keep it depends on the model: re-cut card 3 with each contrast
+    candidate and adopt the best when its decoded cell confidence beats the
+    fallback's.  boxes: pre-derived card boxes in sheet_bgr space; when
+    omitted they are rebuilt from the band taps through
+    forced_card_bboxes (the assisted path)."""
     cards_t = (trace or {}).get("cards") or []
-    if not band_tops or not cards_t or 3 not in by_card:
+    if not cards_t or 3 not in by_card:
         return
+    if boxes is None:
+        if not band_tops:
+            return
+        boxes = photo_sheet_cells.forced_card_bboxes(sheet_bgr, band_tops)
     cands = cards_t[-1].get("rows_contrast") or []
     if not cands:
         return
     used = cards_t[-1].get("rows")
     mc_used = _last_card_mean_conf(by_card, 3, model)
-    boxes = photo_sheet_cells.forced_card_bboxes(sheet_bgr, band_tops)
     best = None
     for cand in cands:
         if cand == used:
@@ -565,6 +571,8 @@ def _read_sheet(model, sheet_bgr, forced_bands=None, pre_boxes=None,
             by.setdefault(cid, {})[(r, c)] = cell
             boxes.setdefault(cid, {})[(r, c)] = box
         by_card, bboxes = by, boxes
+        _adopt_contrast_last_card(model, sheet_bgr, None, by_card, bboxes,
+                                  trace, boxes=pre_boxes)
     else:
         by_card, bboxes = cells_from(sheet_bgr, trace)
     for c in trace.get("cards", []):
